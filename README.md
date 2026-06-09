@@ -30,8 +30,29 @@ cd /root/DN_SN_Alert
 
 ### 2. Install Python dependencies
 
+> **Important:** install the packages for the **same** Python interpreter the systemd
+> service uses (`/usr/bin/python3`). Using a different `pip` is the most common cause of
+> a `ModuleNotFoundError: No module named 'flask'` crash loop after deploying.
+
 ```bash
-pip3 install -r requirements.txt
+sudo /usr/bin/python3 -m pip install -r requirements.txt
+```
+
+If you see `error: externally-managed-environment` (Ubuntu 23.04+ / Debian 12+), use one
+of these instead:
+
+```bash
+# Option A — install via apt (cleanest)
+sudo apt update && sudo apt install -y python3-flask python3-requests
+
+# Option B — force pip to install system-wide
+sudo /usr/bin/python3 -m pip install --break-system-packages -r requirements.txt
+```
+
+Verify the install against the interpreter the service runs:
+
+```bash
+/usr/bin/python3 -c "import flask, werkzeug, requests; print('flask', flask.__version__)"
 ```
 
 ### 3. Run the app (manual / test)
@@ -129,14 +150,73 @@ journalctl -u smartolt-alert -f
 
 ---
 
+## Updating to a New Version
+
+Run these on the server, in the directory the **service** uses (`/root/DN_SN_Alert` by default):
+
+```bash
+cd /root/DN_SN_Alert
+cp smartolt.db smartolt.db.bak          # back up the database first
+git pull origin master                  # get the new code
+sudo /usr/bin/python3 -m pip install -r requirements.txt   # install any new deps
+sudo systemctl restart smartolt-alert
+sudo systemctl status smartolt-alert --no-pager
+```
+
+New database tables are created automatically on startup — no manual migration needed.
+
+> If you edit the code in a different folder (e.g. your home directory), remember the
+> service still loads from the path in `ExecStart`. Pull in that path, or update the
+> service file to point at your folder.
+
+---
+
+## Troubleshooting
+
+**`ModuleNotFoundError: No module named 'flask'` / service crash-loops**
+Flask is not installed for the interpreter in `ExecStart` (`/usr/bin/python3`). Install it
+for that exact interpreter — see [Install Python dependencies](#2-install-python-dependencies).
+
+**`Address already in use` / `Port 5000 is in use`**
+Another process (often a leftover manual `python3 app.py`) is holding the port:
+
+```bash
+ss -ltnp | grep :5000
+sudo pkill -f "python3 /root/DN_SN_Alert/app.py"
+sudo systemctl restart smartolt-alert
+```
+
+**See the real error behind a `status=1/FAILURE`**
+
+```bash
+sudo journalctl -u smartolt-alert -n 40 --no-pager
+```
+
+**Forgot the dashboard password** — reset it from the server:
+
+```bash
+/usr/bin/python3 - <<'PY'
+import sqlite3
+from werkzeug.security import generate_password_hash
+db = sqlite3.connect("/root/DN_SN_Alert/smartolt.db")
+db.execute("UPDATE users SET password_hash=? WHERE username='admin'",
+           (generate_password_hash("admin"),))
+db.commit(); print("admin password reset to: admin")
+PY
+```
+
+---
+
 ## Accessing the Dashboard
 
-| Page       | URL                          | Description                        |
-|------------|------------------------------|------------------------------------|
-| Dashboard  | `http://<ip>:5000/`          | Live stats, trend chart, issues    |
-| Alerts     | `http://<ip>:5000/alerts`    | Full alert log with ack support    |
-| Reports    | `http://<ip>:5000/report`    | Historical breakdown by date range |
-| Settings   | `http://<ip>:5000/settings`  | Telegram token and chat ID         |
+| Page             | URL                          | Description                          |
+|------------------|------------------------------|--------------------------------------|
+| Login            | `http://<ip>:5000/login`     | Sign in (default **admin / admin**)  |
+| Dashboard        | `http://<ip>:5000/`          | Live stats, trend chart, issues      |
+| Alerts           | `http://<ip>:5000/alerts`    | Full alert log with ack support      |
+| Reports          | `http://<ip>:5000/report`    | Historical breakdown by date range   |
+| SmartOLT Servers | `http://<ip>:5000/olts`      | Add/test/enable/delete OLT domains   |
+| Settings         | `http://<ip>:5000/settings`  | Telegram config + change password    |
 
 ---
 
@@ -149,12 +229,15 @@ DN_SN_Alert/
 ├── smartolt-alert.service   # systemd service unit file
 ├── smartolt.db              # SQLite database (auto-created on first run)
 ├── app.log                  # Application log
+├── requirements.txt         # Python dependencies
 ├── templates/
 │   ├── base.html            # Shared layout, sidebar, sound alerts
+│   ├── login.html           # Login page
 │   ├── dashboard.html       # Live stats and current issues
 │   ├── alerts.html          # Alert log with filtering
 │   ├── report.html          # Historical reports
-│   └── settings.html        # Telegram configuration
+│   ├── olts.html            # SmartOLT server (domain + API key) management
+│   └── settings.html        # Telegram config + change password
 └── static/                  # Static assets
 ```
 
