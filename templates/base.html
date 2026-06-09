@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}SmartOLT{% endblock %} — GCN Alert</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:      #0f1117;
+    --card:    #1a1d27;
+    --border:  #2a2d3e;
+    --accent:  #4f8ef7;
+    --green:   #22c55e;
+    --red:     #ef4444;
+    --yellow:  #f59e0b;
+    --purple:  #a855f7;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --sidebar: #13161f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+
+  /* Sidebar */
+  .sidebar { width: 220px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-logo { padding: 24px 20px 16px; border-bottom: 1px solid var(--border); }
+  .sidebar-logo h1 { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: .5px; }
+  .sidebar-logo span { font-size: 11px; color: var(--muted); }
+  .nav { display: flex; flex-direction: column; padding: 12px 0; gap: 2px; }
+  .nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; text-decoration: none; color: var(--muted); font-size: 13.5px; border-radius: 0; transition: background .15s, color .15s; }
+  .nav a:hover, .nav a.active { background: rgba(79,142,247,.1); color: var(--accent); }
+  .nav a .icon { font-size: 16px; width: 18px; text-align: center; }
+  .nav a { justify-content: space-between; }
+  .nav a .left { display:flex; align-items:center; gap:10px; }
+  .badge-count { background: var(--red); color:#fff; border-radius:10px; font-size:10px; font-weight:700; padding:1px 6px; min-width:18px; text-align:center; display:none; }
+  .sidebar-footer { margin-top: auto; padding: 12px 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+  .sound-toggle { display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:pointer; user-select:none; }
+  .sound-toggle input[type=checkbox] { accent-color: var(--accent); width:14px; height:14px; cursor:pointer; }
+  /* Popup notifications */
+  #notif-stack { position:fixed; top:16px; right:16px; z-index:9999; display:flex; flex-direction:column; gap:8px; max-width:320px; }
+  .notif { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; box-shadow:0 4px 24px rgba(0,0,0,.5); animation:slideIn .3s ease; pointer-events:auto; }
+  .notif.pf  { border-left:4px solid var(--yellow); }
+  .notif.los { border-left:4px solid var(--purple); }
+  .notif.off { border-left:4px solid var(--red); }
+  .notif .n-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .notif .n-title  { font-size:13px; font-weight:700; }
+  .notif .n-close  { background:none; border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1; padding:0; }
+  .notif .n-body   { font-size:12px; color:var(--muted); line-height:1.5; }
+  .notif .n-time   { font-size:10px; color:var(--muted); margin-top:4px; }
+  @keyframes slideIn { from { transform:translateX(120%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar { padding: 16px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .topbar h2 { font-size: 18px; font-weight: 600; }
+  .topbar .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .content { padding: 24px 28px; flex: 1; overflow-y: auto; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
+  .card .value { font-size: 32px; font-weight: 700; line-height: 1; }
+  .card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .c-green  .value { color: var(--green); }
+  .c-red    .value { color: var(--red); }
+  .c-yellow .value { color: var(--yellow); }
+  .c-purple .value { color: var(--purple); }
+  .c-blue   .value { color: var(--accent); }
+
+  /* Chart box */
+  .chart-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .chart-box .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .chart-box h3 { font-size: 14px; font-weight: 600; }
+  .chart-tabs { display: flex; gap: 6px; }
+  .chart-tabs button { background: var(--bg); border: 1px solid var(--border); color: var(--muted); padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all .15s; }
+  .chart-tabs button.active, .chart-tabs button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Table */
+  .table-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
+  .table-box .table-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .table-box h3 { font-size: 14px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: rgba(255,255,255,.03); padding: 10px 16px; text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border); }
+  td { padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Badges */
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge-online  { background: rgba(34,197,94,.15);  color: var(--green);  }
+  .badge-offline { background: rgba(239,68,68,.15);  color: var(--red);    }
+  .badge-los     { background: rgba(168,85,247,.15); color: var(--purple); }
+  .badge-pf      { background: rgba(245,158,11,.15); color: var(--yellow); }
+
+  /* Forms (settings) */
+  .form-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 24px; max-width: 520px; }
+  .form-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 20px; }
+  .field { margin-bottom: 18px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .field input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 9px 13px; border-radius: 7px; font-size: 13px; outline: none; }
+  .field input:focus { border-color: var(--accent); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 18px; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-ghost   { background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
+  .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 18px; border-radius: 8px; font-size: 13px; font-weight: 600; z-index: 999; display: none; }
+  .toast-ok  { background: var(--green); color: #fff; }
+  .toast-err { background: var(--red);   color: #fff; }
+
+  /* Report tabs */
+  .rtabs { display: flex; gap: 8px; margin-bottom: 20px; }
+  .rtabs button { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 8px 18px; border-radius: 7px; font-size: 13px; cursor: pointer; }
+  .rtabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .scard { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .scard .slabel { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .scard .sval { font-size: 24px; font-weight: 700; }
+
+  .empty { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .content { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">
+    <h1>GCN Alert</h1>
+    <span>SmartOLT Monitor</span>
+  </div>
+  <div class="nav">
+    <a href="/" class="{% if request.path == '/' %}active{% endif %}">
+      <span class="left"><span class="icon">📊</span> Dashboard</span>
+    </a>
+    <a href="/alerts" class="{% if request.path == '/alerts' %}active{% endif %}">
+      <span class="left"><span class="icon">🔔</span> Alerts</span>
+      <span class="badge-count" id="unread-badge">0</span>
+    </a>
+    <a href="/report" class="{% if request.path == '/report' %}active{% endif %}">
+      <span class="left"><span class="icon">📋</span> Reports</span>
+    </a>
+    <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">
+      <span class="left"><span class="icon">⚙️</span> Settings</span>
+    </a>
+  </div>
+  <div class="sidebar-footer">
+    <label class="sound-toggle">
+      <input type="checkbox" id="sound-toggle" checked onchange="saveSoundPref(this.checked)">
+      <span id="sound-label">🔊 Sound Alerts ON</span>
+    </label>
+    GCN Network © 2026
+  </div>
+</nav>
+<div class="main">
+  {% block body %}{% endblock %}
+</div>
+<div class="toast" id="toast"></div>
+<div id="notif-stack"></div>
+
+<script>
+// ── Toast ──────────────────────────────────────────────────────────────────
+function showToast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// ── Unread badge ───────────────────────────────────────────────────────────
+async function refreshUnreadBadge() {
+  try {
+    const r = await fetch('/api/alerts/unread-count');
+    const d = await r.json();
+    const el = document.getElementById('unread-badge');
+    if (el) {
+      el.textContent = d.count;
+      el.style.display = d.count > 0 ? 'inline-block' : 'none';
+    }
+  } catch(e) {}
+}
+
+// ── Sound preference ───────────────────────────────────────────────────────
+function saveSoundPref(on) {
+  localStorage.setItem('soundAlerts', on ? '1' : '0');
+  document.getElementById('sound-label').textContent = on ? '🔊 Sound Alerts ON' : '🔇 Sound Alerts OFF';
+}
+function soundEnabled() {
+  return localStorage.getItem('soundAlerts') !== '0';
+}
+// Restore toggle state on load
+(function() {
+  const on = soundEnabled();
+  const cb = document.getElementById('sound-toggle');
+  if (cb) cb.checked = on;
+  document.getElementById('sound-label').textContent = on ? '🔊 Sound Alerts ON' : '🔇 Sound Alerts OFF';
+})();
+
+// ── Web Audio API sound generator ─────────────────────────────────────────
+let _audioCtx = null;
+function getCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+function beep(freq, duration, startAt, volume=0.4, type='square') {
+  const ctx = getCtx();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, ctx.currentTime + startAt);
+  gain.gain.setValueAtTime(0, ctx.currentTime + startAt);
+  gain.gain.linearRampToValueAtTime(volume, ctx.currentTime + startAt + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startAt + duration);
+  osc.start(ctx.currentTime + startAt);
+  osc.stop(ctx.currentTime + startAt + duration + 0.05);
+}
+
+// ⚡ Power Fail: 3 urgent high-pitched beeps
+function playPowerFail() {
+  beep(1040, 0.12, 0.00);
+  beep(1040, 0.12, 0.18);
+  beep(1040, 0.12, 0.36);
+  beep(1040, 0.12, 0.54);
+}
+
+// 📡 LOS: 2 descending warning tones
+function playLOS() {
+  beep(780, 0.28, 0.00, 0.4, 'sine');
+  beep(520, 0.28, 0.35, 0.4, 'sine');
+  beep(780, 0.28, 0.70, 0.4, 'sine');
+  beep(520, 0.28, 1.05, 0.4, 'sine');
+}
+
+// ── Popup notification ─────────────────────────────────────────────────────
+const TYPE_META = {
+  POWER_FAIL: { cls:'pf',  icon:'⚡', label:'Power Failure', color:'var(--yellow)' },
+  LOS:        { cls:'los', icon:'📡', label:'Loss of Signal', color:'var(--purple)' },
+  OFFLINE:    { cls:'off', icon:'🔴', label:'ONU Offline',   color:'var(--red)'    },
+  RECOVERY:   { cls:'',   icon:'🟢', label:'ONU Recovered', color:'var(--green)'  },
+};
+
+function showNotif(alert) {
+  const meta  = TYPE_META[alert.event_type] || { cls:'off', icon:'⚠️', label:alert.event_type, color:'var(--muted)' };
+  const stack = document.getElementById('notif-stack');
+  const div   = document.createElement('div');
+  div.className = `notif ${meta.cls}`;
+  div.innerHTML = `
+    <div class="n-header">
+      <span class="n-title" style="color:${meta.color}">${meta.icon} ${meta.label}</span>
+      <button class="n-close" onclick="this.closest('.notif').remove()">×</button>
+    </div>
+    <div class="n-body">
+      <b>${alert.onu_name || 'Unknown ONU'}</b><br>
+      ${alert.zone_name || ''}
+      ${alert.signal_dbm ? ' · ' + alert.signal_dbm + ' dBm' : ''}
+    </div>
+    <div class="n-time">${alert.ts}</div>`;
+  stack.prepend(div);
+  // Auto-dismiss after 12 seconds
+  setTimeout(() => { if (div.parentNode) div.remove(); }, 12000);
+  // Keep max 5 popups
+  while (stack.children.length > 5) stack.lastChild.remove();
+}
+
+// ── Alert poller ───────────────────────────────────────────────────────────
+let lastAlertId = parseInt(localStorage.getItem('lastAlertId') || '0');
+
+async function pollNewAlerts() {
+  try {
+    const r    = await fetch(`/api/alerts/since/${lastAlertId}`);
+    const rows = await r.json();
+    if (!rows.length) return;
+
+    // Update cursor
+    lastAlertId = rows[rows.length - 1].id;
+    localStorage.setItem('lastAlertId', lastAlertId);
+
+    let playedPF = false, playedLOS = false;
+
+    for (const a of rows) {
+      // Show popup for Power Fail and LOS only
+      if (a.event_type === 'POWER_FAIL' || a.event_type === 'LOS') {
+        showNotif(a);
+        if (soundEnabled()) {
+          if (a.event_type === 'POWER_FAIL' && !playedPF) { playPowerFail(); playedPF = true; }
+          if (a.event_type === 'LOS'        && !playedLOS){ playLOS();       playedLOS = true; }
+        }
+      }
+    }
+
+    refreshUnreadBadge();
+  } catch(e) {}
+}
+
+// Initialise lastAlertId to current max on first load (avoid replaying old alerts)
+async function initAlertCursor() {
+  if (localStorage.getItem('lastAlertId')) return;
+  try {
+    const r = await fetch('/api/alerts?limit=1');
+    const rows = await r.json();
+    if (rows.length) {
+      lastAlertId = rows[0].id;
+      localStorage.setItem('lastAlertId', lastAlertId);
+    }
+  } catch(e) {}
+}
+
+// Unlock AudioContext on first user interaction (browser policy)
+document.addEventListener('click', () => { try { getCtx().resume(); } catch(e){} }, { once:true });
+
+initAlertCursor().then(() => {
+  refreshUnreadBadge();
+  setInterval(pollNewAlerts, 30000);   // poll for new alerts every 30s
+  setInterval(refreshUnreadBadge, 60000);
+});
+</script>
+</body>
+</html>

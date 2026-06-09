@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+
+{% block body %}
+<div class="topbar">
+  <div>
+    <h2>Reports</h2>
+    <div class="sub" id="rng-label">Power Fail & LOS events over time</div>
+  </div>
+</div>
+<div class="content">
+
+  <div class="rtabs">
+    <button class="active" onclick="load('yesterday', this)">Yesterday</button>
+    <button onclick="load('7d',        this)">7 Days</button>
+    <button onclick="load('30d',       this)">1 Month</button>
+    <button onclick="load('1y',        this)">1 Year</button>
+  </div>
+
+  <!-- Summary cards -->
+  <div class="summary-cards">
+    <div class="scard">
+      <div class="slabel">Power Fail Events</div>
+      <div class="sval" id="r-pf" style="color:var(--yellow)">—</div>
+    </div>
+    <div class="scard">
+      <div class="slabel">LOS Events</div>
+      <div class="sval" id="r-los" style="color:var(--purple)">—</div>
+    </div>
+    <div class="scard">
+      <div class="slabel">Offline Events</div>
+      <div class="sval" id="r-off" style="color:var(--red)">—</div>
+    </div>
+    <div class="scard">
+      <div class="slabel">Unique ONUs Affected</div>
+      <div class="sval" id="r-unique" style="color:var(--accent)">—</div>
+    </div>
+  </div>
+
+  <!-- Bar chart -->
+  <div class="chart-box" style="margin-bottom:20px">
+    <div class="chart-header"><h3>Daily Event Breakdown</h3></div>
+    <canvas id="reportChart" height="70"></canvas>
+  </div>
+
+  <!-- Events table -->
+  <div class="table-box">
+    <div class="table-header">
+      <h3>Event Log</h3>
+      <span id="r-count" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div id="r-body"><div class="empty">Loading…</div></div>
+  </div>
+
+</div>
+
+<script>
+let rptChart = null;
+
+function badge(status) {
+  const map = {
+    'Offline':    ['badge-offline', '🔴'],
+    'LOS':        ['badge-los',     '📡'],
+    'Power fail': ['badge-pf',      '⚡'],
+  };
+  const [cls, icon] = map[status] || ['badge-offline', '❓'];
+  return `<span class="badge ${cls}">${icon} ${status}</span>`;
+}
+
+async function load(range, btn) {
+  document.querySelectorAll('.rtabs button').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  const labels = { yesterday: 'Yesterday', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '1y': 'Last Year' };
+  document.getElementById('rng-label').textContent = labels[range] + ' — Power Fail & LOS events';
+
+  const r = await fetch('/api/report?range=' + range);
+  const d = await r.json();
+
+  // Summary
+  let pfCount = 0, losCount = 0, offCount = 0, uniqueSet = new Set();
+  (d.summary || []).forEach(s => {
+    if (s.new_status === 'Power fail') { pfCount = s.cnt; uniqueSet.add(s.unique_onus); }
+    if (s.new_status === 'LOS')        { losCount = s.cnt; uniqueSet.add(s.unique_onus); }
+    if (s.new_status === 'Offline')    { offCount = s.cnt; }
+  });
+  const uniqueTotal = (d.summary || []).reduce((acc, s) => acc + (s.unique_onus || 0), 0);
+  document.getElementById('r-pf').textContent     = pfCount;
+  document.getElementById('r-los').textContent    = losCount;
+  document.getElementById('r-off').textContent    = offCount;
+  document.getElementById('r-unique').textContent = uniqueTotal;
+  document.getElementById('r-count').textContent  = (d.events || []).length + ' events';
+
+  // Chart
+  const daily  = d.daily || [];
+  const dLabels = daily.map(x => x.day);
+  const dPf     = daily.map(x => x.power_fail);
+  const dLos    = daily.map(x => x.los);
+  const dOff    = daily.map(x => x.offline);
+
+  if (rptChart) rptChart.destroy();
+  rptChart = new Chart(document.getElementById('reportChart'), {
+    type: 'bar',
+    data: {
+      labels: dLabels,
+      datasets: [
+        { label: 'Power Fail', data: dPf,  backgroundColor: 'rgba(245,158,11,.7)' },
+        { label: 'LOS',        data: dLos, backgroundColor: 'rgba(168,85,247,.7)' },
+        { label: 'Offline',    data: dOff, backgroundColor: 'rgba(239,68,68,.7)'  },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#e2e8f0', font: { size: 12 } } } },
+      scales: {
+        x: { stacked: true, ticks: { color: '#64748b', font: { size: 11 } }, grid: { color: '#2a2d3e' } },
+        y: { stacked: true, ticks: { color: '#64748b', font: { size: 11 } }, grid: { color: '#2a2d3e' } },
+      }
+    }
+  });
+
+  // Table
+  const events = d.events || [];
+  const el = document.getElementById('r-body');
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">No events found for this period.</div>';
+    return;
+  }
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Time</th><th>ONU Name</th><th>Zone</th>
+      <th>OLT / Port</th><th>Event</th><th>Prev Status</th><th>Signal</th><th>Address</th>
+    </tr></thead>
+    <tbody>
+    ${events.map(e => `<tr>
+      <td style="font-size:11px;color:var(--muted);white-space:nowrap">${e.ts}</td>
+      <td><b>${e.onu_name || '—'}</b></td>
+      <td>${e.zone_name || '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${e.olt_name || '—'}<br>${e.port_info || ''}</td>
+      <td>${badge(e.new_status)}</td>
+      <td style="font-size:12px;color:var(--muted)">${e.old_status || '—'}</td>
+      <td style="font-size:12px">${e.signal || '—'} ${e.signal_dbm ? '<br><span style="color:var(--muted)">'+e.signal_dbm+' dBm</span>' : ''}</td>
+      <td style="font-size:12px;color:var(--muted)">${e.address || '—'}</td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+load('yesterday');
+</script>
+{% endblock %}

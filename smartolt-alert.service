@@ -1,0 +1,16 @@
+[Unit]
+Description=SmartOLT Alert Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/DN_SN_Alert/app.py
+WorkingDirectory=/root/DN_SN_Alert
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

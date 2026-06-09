@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Alerts{% endblock %}
+
+{% block body %}
+<div class="topbar">
+  <div>
+    <h2>Alerts</h2>
+    <div class="sub" id="alert-sub">Loading…</div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-ghost" onclick="loadAlerts()">↻ Refresh</button>
+    <button class="btn btn-ghost" onclick="ackAll()" id="ack-all-btn" style="display:none">✓ Mark All Read</button>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- Filter bar -->
+  <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px;align-items:center">
+    <div style="display:flex;gap:6px">
+      <button class="filter-btn active" data-type=""          onclick="setFilter('type','',this)">All</button>
+      <button class="filter-btn"        data-type="OFFLINE"   onclick="setFilter('type','OFFLINE',this)">🔴 Offline</button>
+      <button class="filter-btn"        data-type="LOS"       onclick="setFilter('type','LOS',this)">📡 LOS</button>
+      <button class="filter-btn"        data-type="POWER_FAIL" onclick="setFilter('type','POWER_FAIL',this)">⚡ Power Fail</button>
+      <button class="filter-btn"        data-type="RECOVERY"  onclick="setFilter('type','RECOVERY',this)">🟢 Recovery</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-left:auto">
+      <button class="filter-btn active" data-acked=""  onclick="setFilter('acked','',this)">All</button>
+      <button class="filter-btn"        data-acked="0" onclick="setFilter('acked','0',this)">Unread</button>
+      <button class="filter-btn"        data-acked="1" onclick="setFilter('acked','1',this)">Read</button>
+    </div>
+  </div>
+
+  <!-- Summary mini-cards -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px">
+    <div class="scard"><div class="slabel">Total Alerts</div><div class="sval c-blue" id="a-total" style="color:var(--accent)">—</div></div>
+    <div class="scard"><div class="slabel">Unread</div><div class="sval" id="a-unread" style="color:var(--red)">—</div></div>
+    <div class="scard"><div class="slabel">Delivered</div><div class="sval" id="a-delivered" style="color:var(--green)">—</div></div>
+    <div class="scard"><div class="slabel">Failed</div><div class="sval" id="a-failed" style="color:var(--yellow)">—</div></div>
+  </div>
+
+  <!-- Alert list -->
+  <div class="table-box">
+    <div class="table-header">
+      <h3>Alert Log</h3>
+      <span id="a-count" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div id="alert-list"><div class="empty">Loading…</div></div>
+  </div>
+
+</div>
+
+<style>
+.filter-btn { background:var(--card); border:1px solid var(--border); color:var(--muted); padding:6px 14px; border-radius:6px; font-size:12px; cursor:pointer; transition:all .15s; }
+.filter-btn.active, .filter-btn:hover { background:var(--accent); border-color:var(--accent); color:#fff; }
+.scard { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+.slabel { font-size:11px; color:var(--muted); margin-bottom:4px; }
+.sval { font-size:24px; font-weight:700; }
+.alert-row.unread td:first-child { border-left:3px solid var(--red); }
+.alert-row.unread { background: rgba(239,68,68,.04); }
+.alert-row.acked  { opacity:.6; }
+.ack-btn { background:none; border:1px solid var(--border); color:var(--muted); padding:3px 9px; border-radius:5px; font-size:11px; cursor:pointer; }
+.ack-btn:hover { border-color:var(--green); color:var(--green); }
+.tg-ok  { color:var(--green); font-size:11px; }
+.tg-err { color:var(--red);   font-size:11px; }
+</style>
+
+<script>
+let filters = { type: '', acked: '' };
+
+function setFilter(key, val, btn) {
+  filters[key] = val;
+  // Highlight active button within its group
+  const group = btn.parentElement.querySelectorAll('.filter-btn');
+  group.forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadAlerts();
+}
+
+function eventBadge(type) {
+  const map = {
+    OFFLINE:    ['badge-offline','🔴 Offline'],
+    LOS:        ['badge-los',   '📡 LOS'],
+    POWER_FAIL: ['badge-pf',    '⚡ Power Fail'],
+    RECOVERY:   ['badge-online','🟢 Recovery'],
+  };
+  const [cls, label] = map[type] || ['badge-offline', type];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+async function ack(id, btn) {
+  await fetch(`/api/alerts/${id}/ack`, { method: 'POST' });
+  const row = document.getElementById(`row-${id}`);
+  if (row) { row.classList.remove('unread'); row.classList.add('acked'); }
+  btn.remove();
+  refreshUnreadBadge();
+}
+
+async function ackAll() {
+  await fetch('/api/alerts/ack-all', { method: 'POST' });
+  document.querySelectorAll('.alert-row.unread').forEach(r => {
+    r.classList.remove('unread'); r.classList.add('acked');
+  });
+  document.querySelectorAll('.ack-btn').forEach(b => b.remove());
+  document.getElementById('ack-all-btn').style.display = 'none';
+  refreshUnreadBadge();
+}
+
+async function loadAlerts() {
+  const params = new URLSearchParams();
+  if (filters.type)  params.set('type',  filters.type);
+  if (filters.acked !== '') params.set('acked', filters.acked);
+  params.set('limit', '300');
+
+  const r    = await fetch('/api/alerts?' + params);
+  const rows = await r.json();
+
+  const total     = rows.length;
+  const unread    = rows.filter(r => !r.acknowledged).length;
+  const delivered = rows.filter(r => r.tg_delivered).length;
+  const failed    = rows.filter(r => !r.tg_delivered).length;
+
+  document.getElementById('a-total').textContent     = total;
+  document.getElementById('a-unread').textContent    = unread;
+  document.getElementById('a-delivered').textContent = delivered;
+  document.getElementById('a-failed').textContent    = failed;
+  document.getElementById('a-count').textContent     = total + ' alerts';
+  document.getElementById('alert-sub').textContent   = `${unread} unread · Last refresh: ${new Date().toLocaleTimeString()}`;
+
+  const ackAllBtn = document.getElementById('ack-all-btn');
+  ackAllBtn.style.display = unread > 0 ? 'inline-flex' : 'none';
+
+  const el = document.getElementById('alert-list');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No alerts found.</div>';
+    return;
+  }
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Time</th>
+      <th>Event</th>
+      <th>ONU Name</th>
+      <th>Zone</th>
+      <th>OLT / Port</th>
+      <th>Signal</th>
+      <th>Address</th>
+      <th>Telegram</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    ${rows.map(a => {
+      const isUnread = !a.acknowledged;
+      const rowClass = isUnread ? 'alert-row unread' : 'alert-row acked';
+      const tgStatus = a.tg_delivered
+        ? `<span class="tg-ok">✓ Sent</span>`
+        : `<span class="tg-err" title="${a.tg_error || ''}">✗ ${a.tg_error || 'Failed'}</span>`;
+      const ackBtn = isUnread
+        ? `<button class="ack-btn" onclick="ack(${a.id},this)">Mark read</button>`
+        : '';
+      return `<tr id="row-${a.id}" class="${rowClass}">
+        <td style="font-size:11px;color:var(--muted);white-space:nowrap">${a.ts}</td>
+        <td>${eventBadge(a.event_type)}</td>
+        <td><b>${a.onu_name || '—'}</b><br><span style="font-size:11px;color:var(--muted)">${a.sn || ''}</span></td>
+        <td style="font-size:12px">${a.zone_name || '—'}</td>
+        <td style="font-size:12px;color:var(--muted)">${a.olt_name || '—'}<br>${a.port_info || ''}</td>
+        <td style="font-size:12px">${a.signal || '—'}<br><span style="color:var(--muted)">${a.signal_dbm ? a.signal_dbm+' dBm':''}</span></td>
+        <td style="font-size:12px;color:var(--muted)">${a.address || '—'}</td>
+        <td>${tgStatus}</td>
+        <td>${ackBtn}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
+loadAlerts();
+setInterval(loadAlerts, 60000);
+</script>
+{% endblock %}

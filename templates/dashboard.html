@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block body %}
+<div class="topbar">
+  <div>
+    <h2>Dashboard</h2>
+    <div class="sub" id="last-updated">Loading…</div>
+  </div>
+  <button class="btn btn-ghost" onclick="loadAll()">↻ Refresh</button>
+</div>
+<div class="content">
+
+  <!-- Stat cards -->
+  <div class="cards">
+    <div class="card c-blue">
+      <div class="label">Total ONUs</div>
+      <div class="value" id="s-total">—</div>
+      <div class="sub">registered devices</div>
+    </div>
+    <div class="card c-green">
+      <div class="label">Online</div>
+      <div class="value" id="s-online">—</div>
+      <div class="sub" id="s-online-pct">—</div>
+    </div>
+    <div class="card c-red">
+      <div class="label">Offline</div>
+      <div class="value" id="s-offline">—</div>
+      <div class="sub">not reachable</div>
+    </div>
+    <div class="card c-yellow">
+      <div class="label">Power Fail</div>
+      <div class="value" id="s-pf">—</div>
+      <div class="sub">power outage</div>
+    </div>
+    <div class="card c-purple">
+      <div class="label">LOS</div>
+      <div class="value" id="s-los">—</div>
+      <div class="sub">loss of signal</div>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div class="chart-box">
+    <div class="chart-header">
+      <h3>ONU Status Trend</h3>
+      <div class="chart-tabs">
+        <button class="active" onclick="loadChart('24h',this)">24h</button>
+        <button onclick="loadChart('7d',this)">7 Days</button>
+        <button onclick="loadChart('30d',this)">30 Days</button>
+      </div>
+    </div>
+    <canvas id="trendChart" height="80"></canvas>
+  </div>
+
+  <!-- Current issues table -->
+  <div class="table-box">
+    <div class="table-header">
+      <h3>Current Issues</h3>
+      <span id="issues-count" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div id="issues-body">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let trendChart = null;
+
+function badge(status) {
+  const map = {
+    'Online':     ['badge-online',  '🟢'],
+    'Offline':    ['badge-offline', '🔴'],
+    'LOS':        ['badge-los',     '📡'],
+    'Power fail': ['badge-pf',      '⚡'],
+  };
+  const [cls, icon] = map[status] || ['badge-offline', '❓'];
+  return `<span class="badge ${cls}">${icon} ${status}</span>`;
+}
+
+async function loadStats() {
+  const r = await fetch('/api/stats');
+  const d = await r.json();
+  document.getElementById('s-total').textContent   = d.total   ?? '—';
+  document.getElementById('s-online').textContent  = d.online  ?? '—';
+  document.getElementById('s-offline').textContent = d.offline ?? '—';
+  document.getElementById('s-pf').textContent      = d.power_fail ?? '—';
+  document.getElementById('s-los').textContent     = d.los     ?? '—';
+  const pct = d.total ? ((d.online / d.total) * 100).toFixed(1) : '—';
+  document.getElementById('s-online-pct').textContent = pct + '% uptime';
+  document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+}
+
+async function loadChart(period, btn) {
+  document.querySelectorAll('.chart-tabs button').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const r = await fetch('/api/chart?period=' + period);
+  const rows = await r.json();
+  const labels     = rows.map(r => r.label);
+  const online     = rows.map(r => Math.round(r.online));
+  const offline    = rows.map(r => Math.round(r.offline));
+  const los        = rows.map(r => Math.round(r.los));
+  const power_fail = rows.map(r => Math.round(r.power_fail));
+
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Online',     data: online,     borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,.08)',   tension: .3, fill: true, pointRadius: 2 },
+        { label: 'Offline',    data: offline,    borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,.08)',   tension: .3, fill: false, pointRadius: 2 },
+        { label: 'LOS',        data: los,        borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,.08)',  tension: .3, fill: false, pointRadius: 2 },
+        { label: 'Power Fail', data: power_fail, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)',  tension: .3, fill: false, pointRadius: 2 },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#e2e8f0', font: { size: 12 } } } },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 12, font: { size: 11 } }, grid: { color: '#2a2d3e' } },
+        y: { ticks: { color: '#64748b', font: { size: 11 } }, grid: { color: '#2a2d3e' } },
+      }
+    }
+  });
+}
+
+async function loadIssues() {
+  const r = await fetch('/api/current-issues');
+  const rows = await r.json();
+  const el = document.getElementById('issues-body');
+  document.getElementById('issues-count').textContent = rows.length + ' devices with issues';
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">✅ All ONUs online — no current issues</div>';
+    return;
+  }
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>ONU Name</th><th>Zone</th><th>OLT / Port</th>
+      <th>Status</th><th>Signal</th><th>Address</th><th>Since</th>
+    </tr></thead>
+    <tbody>
+    ${rows.map(r => `<tr>
+      <td><b>${r.onu_name || '—'}</b></td>
+      <td>${r.zone_name || '—'}</td>
+      <td style="color:var(--muted);font-size:12px">${r.olt_name || '—'}<br>${r.port_info || ''}</td>
+      <td>${badge(r.new_status)}</td>
+      <td style="font-size:12px">${r.signal || '—'}<br><span style="color:var(--muted)">${r.signal_dbm ? r.signal_dbm+' dBm' : ''}</span></td>
+      <td style="font-size:12px;color:var(--muted)">${r.address || '—'}</td>
+      <td style="font-size:11px;color:var(--muted)">${r.ts || '—'}</td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function loadAll() {
+  loadStats();
+  loadChart('24h');
+  loadIssues();
+}
+
+loadAll();
+setInterval(loadAll, 60000); // refresh every minute
+</script>
+{% endblock %}
