@@ -78,6 +78,22 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_snap_ts ON snapshots(ts);
 
+        -- Per-server / per-OLT snapshot, written each poll cycle for filtering
+        CREATE TABLE IF NOT EXISTS olt_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          TEXT NOT NULL,
+            server_id   INTEGER,
+            server_name TEXT,
+            olt_name    TEXT,
+            total       INTEGER,
+            online      INTEGER,
+            offline     INTEGER,
+            los         INTEGER,
+            power_fail  INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_oltsnap_ts  ON olt_snapshots(ts);
+        CREATE INDEX IF NOT EXISTS idx_oltsnap_grp ON olt_snapshots(server_id, olt_name);
+
         CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
             value TEXT
@@ -127,6 +143,21 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_alerts_ts  ON alerts(ts);
         CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged);
         """)
+
+def _table_columns(db, table: str) -> set[str]:
+    return {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+def migrate_db():
+    """Add columns introduced after the original schema, for existing databases."""
+    with get_db() as db:
+        cols = _table_columns(db, "onu_state")
+        for col, decl in (("olt_name", "TEXT"), ("server_id", "INTEGER"), ("server_name", "TEXT")):
+            if col not in cols:
+                db.execute(f"ALTER TABLE onu_state ADD COLUMN {col} {decl}")
+        cols = _table_columns(db, "status_events")
+        for col, decl in (("server_id", "INTEGER"), ("server_name", "TEXT")):
+            if col not in cols:
+                db.execute(f"ALTER TABLE status_events ADD COLUMN {col} {decl}")
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 def cfg_get(key: str, default="") -> str:
@@ -322,22 +353,35 @@ def poll_once():
     onus = fetch_onus()
 
     counts = {"total": len(onus), "online": 0, "offline": 0, "los": 0, "power_fail": 0}
+    groups: dict[tuple, dict] = {}   # (server_id, server_name, olt_name) → counts
     events = []
 
-    for onu in onus:
-        uid        = onu_key(onu)
-        cur_status = onu.get("status", "Unknown")
-        cur_signal = onu.get("signal")
+    def _tally(bucket: dict, status: str):
+        if status == "Online":
+            bucket["online"] += 1
+        elif status == "Offline":
+            bucket["offline"] += 1
+        elif status == "LOS":
+            bucket["los"] += 1
+        elif status == "Power fail":
+            bucket["power_fail"] += 1
 
-        # Count
-        if cur_status == "Online":
-            counts["online"] += 1
-        elif cur_status == "Offline":
-            counts["offline"] += 1
-        elif cur_status == "LOS":
-            counts["los"] += 1
-        elif cur_status == "Power fail":
-            counts["power_fail"] += 1
+    for onu in onus:
+        uid         = onu_key(onu)
+        cur_status  = onu.get("status", "Unknown")
+        cur_signal  = onu.get("signal")
+        server_id   = onu.get("_olt_id")
+        server_name = onu.get("_olt_src")
+        olt_name    = onu.get("olt_name")
+
+        # Global count
+        _tally(counts, cur_status)
+
+        # Per server/OLT count
+        gkey = (server_id, server_name, olt_name)
+        g = groups.setdefault(gkey, {"total": 0, "online": 0, "offline": 0, "los": 0, "power_fail": 0})
+        g["total"] += 1
+        _tally(g, cur_status)
 
         old_status = _prev_state.get(uid)
         if old_status is not None and old_status != cur_status:
@@ -345,7 +389,7 @@ def poll_once():
                 "ts": ts, "uid": uid,
                 "name":    onu.get("name"),
                 "zone":    onu.get("zone_name"),
-                "olt":     onu.get("olt_name"),
+                "olt":     olt_name,
                 "port":    f"{onu.get('board')}/{onu.get('port')}/{onu.get('onu')}",
                 "sn":      onu.get("sn"),
                 "address": onu.get("address"),
@@ -353,6 +397,8 @@ def poll_once():
                 "new":     cur_status,
                 "signal":  cur_signal,
                 "sig_dbm": onu.get("signal_1490") or onu.get("signal_1310"),
+                "server_id":   server_id,
+                "server_name": server_name,
             })
 
             # Send alert and log it
@@ -370,20 +416,29 @@ def poll_once():
             "INSERT INTO snapshots(ts,total,online,offline,los,power_fail) VALUES(?,?,?,?,?,?)",
             (ts, counts["total"], counts["online"], counts["offline"], counts["los"], counts["power_fail"]),
         )
+        for (sid, sname, oname), g in groups.items():
+            db.execute(
+                "INSERT INTO olt_snapshots(ts,server_id,server_name,olt_name,total,online,offline,los,power_fail) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (ts, sid, sname, oname, g["total"], g["online"], g["offline"], g["los"], g["power_fail"]),
+            )
         for e in events:
             db.execute(
-                "INSERT INTO status_events(ts,onu_uid,onu_name,zone_name,olt_name,port_info,sn,address,old_status,new_status,signal,signal_dbm) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO status_events(ts,onu_uid,onu_name,zone_name,olt_name,port_info,sn,address,old_status,new_status,signal,signal_dbm,server_id,server_name) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (e["ts"], e["uid"], e["name"], e["zone"], e["olt"], e["port"],
-                 e["sn"], e["address"], e["old"], e["new"], e["signal"], e["sig_dbm"]),
+                 e["sn"], e["address"], e["old"], e["new"], e["signal"], e["sig_dbm"],
+                 e["server_id"], e["server_name"]),
             )
         # Persist current state so it survives restarts
         for onu in onus:
             uid = onu_key(onu)
             if uid:
                 db.execute(
-                    "INSERT OR REPLACE INTO onu_state(uid, status, signal) VALUES(?,?,?)",
-                    (uid, onu.get("status"), onu.get("signal")),
+                    "INSERT OR REPLACE INTO onu_state(uid, status, signal, olt_name, server_id, server_name) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (uid, onu.get("status"), onu.get("signal"),
+                     onu.get("olt_name"), onu.get("_olt_id"), onu.get("_olt_src")),
                 )
 
     log.info("Poll done — total:%d online:%d offline:%d los:%d pf:%d events:%d",
@@ -451,38 +506,84 @@ def settings():
     tg_chat_id = cfg_get("tg_chat_id")
     return render_template("settings.html", tg_token=tg_token, tg_chat_id=tg_chat_id)
 
+# ── API: dashboard filters (domains + OLTs) ───────────────────────────────────
+@app.route("/api/filters")
+def api_filters():
+    """Domains (SmartOLT servers) and the OLTs seen under each, for the dropdowns."""
+    with get_db() as db:
+        servers = [dict(r) for r in db.execute(
+            "SELECT id, name FROM olts ORDER BY name"
+        ).fetchall()]
+        olts = [dict(r) for r in db.execute("""
+            SELECT DISTINCT server_id, server_name, olt_name
+            FROM olt_snapshots
+            WHERE ts = (SELECT MAX(ts) FROM olt_snapshots)
+              AND olt_name IS NOT NULL
+            ORDER BY server_name, olt_name
+        """).fetchall()]
+    return jsonify({"servers": servers, "olts": olts})
+
+def _dash_filters():
+    """Read domain/olt query params (domain = server id)."""
+    return request.args.get("domain", "").strip(), request.args.get("olt", "").strip()
+
 # ── API: live stats ───────────────────────────────────────────────────────────
 @app.route("/api/stats")
 def api_stats():
+    server, olt = _dash_filters()
+    if not server and not olt:
+        # Unfiltered: latest global snapshot
+        with get_db() as db:
+            row = db.execute("SELECT * FROM snapshots ORDER BY ts DESC LIMIT 1").fetchone()
+        if row:
+            return jsonify(dict(row))
+        return jsonify({"total": 0, "online": 0, "offline": 0, "los": 0, "power_fail": 0})
+
+    # Filtered: sum the most recent per-OLT snapshot batch
+    wheres = ["ts = (SELECT MAX(ts) FROM olt_snapshots)"]
+    params: list = []
+    if server:
+        wheres.append("server_id = ?"); params.append(server)
+    if olt:
+        wheres.append("olt_name = ?"); params.append(olt)
+    sql = ("SELECT COALESCE(SUM(total),0) AS total, COALESCE(SUM(online),0) AS online, "
+           "COALESCE(SUM(offline),0) AS offline, COALESCE(SUM(los),0) AS los, "
+           "COALESCE(SUM(power_fail),0) AS power_fail FROM olt_snapshots WHERE "
+           + " AND ".join(wheres))
     with get_db() as db:
-        row = db.execute(
-            "SELECT * FROM snapshots ORDER BY ts DESC LIMIT 1"
-        ).fetchone()
-    if row:
-        return jsonify(dict(row))
-    return jsonify({"total": 0, "online": 0, "offline": 0, "los": 0, "power_fail": 0})
+        row = db.execute(sql, params).fetchone()
+    return jsonify(dict(row))
 
 @app.route("/api/current-issues")
 def api_current_issues():
     """Live current non-Online ONUs (always fresh from last poll state)."""
+    server, olt = _dash_filters()
+    extra, params = "", []
+    if server:
+        extra += " AND s.server_id = ?"; params.append(server)
+    if olt:
+        extra += " AND e.olt_name = ?"; params.append(olt)
     with get_db() as db:
-        # Get last known status for every ONU from status_events
-        rows = db.execute("""
+        # Latest event per ONU, joined to live state for the server filter
+        rows = db.execute(f"""
             SELECT e.onu_name, e.zone_name, e.olt_name, e.port_info, e.sn,
-                   e.address, e.new_status, e.signal, e.signal_dbm, e.ts
+                   e.address, e.new_status, e.signal, e.signal_dbm, e.ts,
+                   s.server_id, s.server_name
             FROM status_events e
             INNER JOIN (
                 SELECT onu_uid, MAX(id) AS max_id FROM status_events GROUP BY onu_uid
             ) latest ON e.id = latest.max_id
-            WHERE e.new_status != 'Online'
+            LEFT JOIN onu_state s ON s.uid = e.onu_uid
+            WHERE e.new_status != 'Online' {extra}
             ORDER BY e.ts DESC
-        """).fetchall()
+        """, params).fetchall()
     return jsonify([dict(r) for r in rows])
 
 # ── API: chart data (last 24h / 7d) ──────────────────────────────────────────
 @app.route("/api/chart")
 def api_chart():
     period = request.args.get("period", "24h")
+    server, olt = _dash_filters()
     if period == "7d":
         since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         group = "strftime('%Y-%m-%d %H:00', ts)"
@@ -494,15 +595,39 @@ def api_chart():
         group = "strftime('%Y-%m-%d %H:00', ts)"
 
     with get_db() as db:
-        rows = db.execute(f"""
-            SELECT {group} AS label,
-                   AVG(online) AS online, AVG(offline) AS offline,
-                   AVG(los) AS los, AVG(power_fail) AS power_fail
-            FROM snapshots
-            WHERE ts >= ?
-            GROUP BY label
-            ORDER BY label
-        """, (since,)).fetchall()
+        if not server and not olt:
+            # Unfiltered: global snapshots (full history)
+            rows = db.execute(f"""
+                SELECT {group} AS label,
+                       AVG(online) AS online, AVG(offline) AS offline,
+                       AVG(los) AS los, AVG(power_fail) AS power_fail
+                FROM snapshots
+                WHERE ts >= ?
+                GROUP BY label
+                ORDER BY label
+            """, (since,)).fetchall()
+        else:
+            # Filtered: sum matching OLTs per instant, then average over the bucket
+            wheres = ["ts >= ?"]; params = [since]
+            if server:
+                wheres.append("server_id = ?"); params.append(server)
+            if olt:
+                wheres.append("olt_name = ?"); params.append(olt)
+            rows = db.execute(f"""
+                SELECT {group} AS label,
+                       AVG(online) AS online, AVG(offline) AS offline,
+                       AVG(los) AS los, AVG(power_fail) AS power_fail
+                FROM (
+                    SELECT ts,
+                           SUM(online) AS online, SUM(offline) AS offline,
+                           SUM(los) AS los, SUM(power_fail) AS power_fail
+                    FROM olt_snapshots
+                    WHERE {' AND '.join(wheres)}
+                    GROUP BY ts
+                )
+                GROUP BY label
+                ORDER BY label
+            """, params).fetchall()
 
     return jsonify([dict(r) for r in rows])
 
@@ -771,6 +896,7 @@ def api_test_telegram():
 # ── Startup ───────────────────────────────────────────────────────────────────
 def start():
     init_db()
+    migrate_db()
     seed_defaults()
     app.secret_key = get_secret_key()
     global _prev_state

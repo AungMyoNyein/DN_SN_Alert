@@ -2,12 +2,33 @@
 {% block title %}Dashboard{% endblock %}
 
 {% block body %}
+<style>
+  .filter-select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 10px; border-radius: 7px; font-size: 13px; outline: none; min-width: 150px;
+  }
+  .filter-select:focus { border-color: var(--accent); }
+</style>
 <div class="topbar">
   <div>
     <h2>Dashboard</h2>
     <div class="sub" id="last-updated">Loading…</div>
   </div>
-  <button class="btn btn-ghost" onclick="loadAll()">↻ Refresh</button>
+  <div style="display:flex;align-items:flex-end;gap:12px">
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)">
+      Domain
+      <select id="f-domain" class="filter-select" onchange="onDomainChange()">
+        <option value="">All Domains</option>
+      </select>
+    </label>
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)">
+      OLT
+      <select id="f-olt" class="filter-select" onchange="loadAll()">
+        <option value="">All OLTs</option>
+      </select>
+    </label>
+    <button class="btn btn-ghost" onclick="loadAll()">↻ Refresh</button>
+  </div>
 </div>
 <div class="content">
 
@@ -68,6 +89,53 @@
 
 <script>
 let trendChart = null;
+let currentPeriod = '24h';
+let ALL_OLTS = [];   // [{server_id, server_name, olt_name}]
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Build the ?domain=&olt= query string from the current dropdown selection
+function filterQS() {
+  const dom = document.getElementById('f-domain').value;
+  const olt = document.getElementById('f-olt').value;
+  const parts = [];
+  if (dom) parts.push('domain=' + encodeURIComponent(dom));
+  if (olt) parts.push('olt=' + encodeURIComponent(olt));
+  return parts.join('&');
+}
+
+async function loadFilters() {
+  let d;
+  try { d = await (await fetch('/api/filters')).json(); }
+  catch (e) { return; }
+  ALL_OLTS = d.olts || [];
+  const dom = document.getElementById('f-domain');
+  const keep = dom.value;
+  dom.innerHTML = '<option value="">All Domains</option>' +
+    (d.servers || []).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  dom.value = keep;                 // preserve selection across auto-refresh
+  populateOlts();
+}
+
+function populateOlts() {
+  const dom = document.getElementById('f-domain').value;
+  const oltSel = document.getElementById('f-olt');
+  const keep = oltSel.value;
+  const names = [...new Set(
+    ALL_OLTS.filter(o => !dom || String(o.server_id) === String(dom))
+            .map(o => o.olt_name).filter(Boolean)
+  )].sort();
+  oltSel.innerHTML = '<option value="">All OLTs</option>' +
+    names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  oltSel.value = names.includes(keep) ? keep : '';
+}
+
+function onDomainChange() {
+  populateOlts();
+  loadAll();
+}
 
 function badge(status) {
   const map = {
@@ -81,7 +149,7 @@ function badge(status) {
 }
 
 async function loadStats() {
-  const r = await fetch('/api/stats');
+  const r = await fetch('/api/stats?' + filterQS());
   const d = await r.json();
   document.getElementById('s-total').textContent   = d.total   ?? '—';
   document.getElementById('s-online').textContent  = d.online  ?? '—';
@@ -94,9 +162,12 @@ async function loadStats() {
 }
 
 async function loadChart(period, btn) {
-  document.querySelectorAll('.chart-tabs button').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  const r = await fetch('/api/chart?period=' + period);
+  if (period) currentPeriod = period;
+  if (btn) {
+    document.querySelectorAll('.chart-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  const r = await fetch('/api/chart?period=' + currentPeriod + '&' + filterQS());
   const rows = await r.json();
   const labels     = rows.map(r => r.label);
   const online     = rows.map(r => Math.round(r.online));
@@ -128,7 +199,7 @@ async function loadChart(period, btn) {
 }
 
 async function loadIssues() {
-  const r = await fetch('/api/current-issues');
+  const r = await fetch('/api/current-issues?' + filterQS());
   const rows = await r.json();
   const el = document.getElementById('issues-body');
   document.getElementById('issues-count').textContent = rows.length + ' devices with issues';
@@ -156,11 +227,12 @@ async function loadIssues() {
 
 function loadAll() {
   loadStats();
-  loadChart('24h');
+  loadChart();          // keeps the currently selected period
   loadIssues();
 }
 
-loadAll();
-setInterval(loadAll, 60000); // refresh every minute
+// Populate dropdowns first, then load everything
+loadFilters().then(loadAll);
+setInterval(() => { loadFilters(); loadAll(); }, 60000); // refresh every minute
 </script>
 {% endblock %}
