@@ -68,10 +68,6 @@
         <h3>🔻 DN &amp; SN Down Alerts</h3>
         <span id="dnsn-count" style="font-size:12px;color:var(--muted)"></span>
       </div>
-      <div class="chart-tabs">
-        <button id="tab-dn" class="active" onclick="setGroup('zone',this)">DN (Zone)</button>
-        <button id="tab-sn" onclick="setGroup('odb',this)">SN (ODB)</button>
-      </div>
     </div>
     <div id="dnsn-body">
       <div class="empty">Loading…</div>
@@ -154,16 +150,8 @@ async function loadStats() {
 
 // DN = Zone, SN = ODB (optical distribution box)
 let DOWN_ROWS  = [];          // cached current down ONUs
-let GROUP_BY   = 'zone';      // 'zone' (DN) or 'odb' (SN)
 let GROUP_KEYS = [];          // index → group key (for drill-down toggle)
 const OPEN_GROUPS = new Set();// keys of expanded groups (preserved across refresh)
-
-function setGroup(mode, btn) {
-  GROUP_BY = mode;
-  document.querySelectorAll('#tab-dn,#tab-sn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  renderDnsn();
-}
 
 function countStatus(rows, st) { return rows.filter(r => r.new_status === st).length; }
 
@@ -201,34 +189,37 @@ function renderDnsn() {
     return;
   }
 
-  const field = GROUP_BY === 'odb' ? 'odb' : 'zone_name';
-  const label = GROUP_BY === 'odb' ? 'SN (ODB)' : 'DN (Zone)';
+  // Group by each Zone + ODB pair
   const groups = {};
   for (const r of rows) {
-    const k = r[field] || '—';
-    (groups[k] = groups[k] || []).push(r);
+    const zone = r.zone_name || '—';
+    const odb  = r.odb || '—';
+    const k = zone + '' + odb;
+    (groups[k] = groups[k] || { zone, odb, rows: [] }).rows.push(r);
   }
-  const names = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
-  GROUP_KEYS = names.map(n => GROUP_BY + '|' + n);
+  const keys = Object.keys(groups).sort((a, b) => groups[b].rows.length - groups[a].rows.length);
+  GROUP_KEYS = keys;
 
   el.innerHTML = `<table>
     <thead><tr>
-      <th>${label}</th><th>Down</th><th>🔴 Offline</th><th>📡 LOS</th><th>⚡ Power Fail</th><th></th>
+      <th>DN (Zone)</th><th>SN (ODB)</th><th>Down</th>
+      <th>🔴 Offline</th><th>📡 LOS</th><th>⚡ Power Fail</th><th></th>
     </tr></thead>
     <tbody>
-    ${names.map((name, i) => {
-      const g = groups[name];
-      const open = OPEN_GROUPS.has(GROUP_KEYS[i]);
+    ${keys.map((k, i) => {
+      const g = groups[k];
+      const open = OPEN_GROUPS.has(k);
       return `<tr style="cursor:pointer" onclick="toggleGroup(${i})">
-        <td><b>${esc(name)}</b></td>
-        <td><b>${g.length}</b></td>
-        <td>${countStatus(g,'Offline')    || ''}</td>
-        <td>${countStatus(g,'LOS')        || ''}</td>
-        <td>${countStatus(g,'Power fail') || ''}</td>
+        <td><b>${esc(g.zone)}</b></td>
+        <td>${esc(g.odb)}</td>
+        <td><b>${g.rows.length}</b></td>
+        <td>${countStatus(g.rows,'Offline')    || ''}</td>
+        <td>${countStatus(g.rows,'LOS')        || ''}</td>
+        <td>${countStatus(g.rows,'Power fail') || ''}</td>
         <td style="text-align:right;color:var(--muted)"><span id="caret-${i}">${open ? '▾' : '▸'}</span></td>
       </tr>
       <tr id="detail-${i}" style="display:${open ? '' : 'none'}">
-        <td colspan="6" style="padding:0;background:var(--bg)">${detailTable(g)}</td>
+        <td colspan="7" style="padding:0;background:var(--bg)">${detailTable(g.rows)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`;
