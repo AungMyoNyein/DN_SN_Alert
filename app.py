@@ -3,6 +3,7 @@
 SmartOLT Web Dashboard + Alert System
 """
 
+import os
 import sqlite3
 import threading
 import time
@@ -21,7 +22,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 BASE        = Path(__file__).parent
 DB_PATH     = BASE / "smartolt.db"
 LOG_FILE    = BASE / "app.log"
-POLL_INTERVAL  = 300   # 5 minutes
+# SmartOLT caps get_all_onus_details at 15 calls/hour per account. One call per
+# OLT per poll, so 300s = 12/hour stays safely under it. Override with the
+# POLL_INTERVAL env var (don't go below 300 unless you run a single poller).
+POLL_INTERVAL  = max(240, int(os.environ.get("POLL_INTERVAL", "300")))
+# When a server's fetch fails (e.g. 403 rate-limit/block), pause polling it this
+# long so we don't keep it pinned over the limit and waste calls.
+FAIL_COOLDOWN  = timedelta(minutes=30)
 DOWN_STATUSES  = {"Offline", "LOS", "Power fail"}
 HIGH_LOSS_DBM  = -25.0  # Online ONUs with RX signal at/below this are "High Loss"
 
@@ -279,18 +286,28 @@ def save_alert(onu: dict, new_status: str, old_status: str, delivered: bool, tg_
         )
 
 # ── SmartOLT API ──────────────────────────────────────────────────────────────
+_olt_cooldown: dict[int, datetime] = {}   # olt_id → don't poll until this time
+
 def fetch_onus() -> list[dict]:
     """Fetch ONUs from every enabled OLT and merge them into one list.
 
     Each ONU is tagged with `_olt_id` so its state key stays unique even if two
-    SmartOLT accounts happen to reuse the same unique_external_id."""
+    SmartOLT accounts happen to reuse the same unique_external_id. A server that
+    fails (e.g. a 403 rate-limit block) is paused for FAIL_COOLDOWN so we stop
+    spending its limited API budget and let the limit window reset."""
     olts = get_enabled_olts()
     if not olts:
         log.warning("No enabled OLTs configured — nothing to poll")
         return []
 
+    now = datetime.now()
     merged: list[dict] = []
     for olt in olts:
+        until = _olt_cooldown.get(olt["id"])
+        if until and now < until:
+            log.warning("OLT '%s' in cooldown until %s — skipping",
+                        olt["name"], until.strftime("%H:%M:%S"))
+            continue
         try:
             r = requests.get(
                 f"{olt_api_url(olt['domain'])}/onu/get_all_onus_details",
@@ -301,15 +318,19 @@ def fetch_onus() -> list[dict]:
             data = r.json()
             if isinstance(data.get("status"), bool) and not data["status"]:
                 log.error("OLT '%s' API error: %s", olt["name"], data.get("error", "unknown"))
+                _olt_cooldown[olt["id"]] = now + FAIL_COOLDOWN
                 continue
             onus = data.get("onus", [])
             for onu in onus:
                 onu["_olt_id"]  = olt["id"]
                 onu["_olt_src"] = olt["name"]
             merged.extend(onus)
+            _olt_cooldown.pop(olt["id"], None)   # success clears any cooldown
             log.info("OLT '%s' returned %d ONUs", olt["name"], len(onus))
         except Exception as exc:
-            log.error("OLT '%s' fetch failed: %s", olt["name"], exc)
+            _olt_cooldown[olt["id"]] = now + FAIL_COOLDOWN
+            log.error("OLT '%s' fetch failed (pausing %d min): %s",
+                      olt["name"], int(FAIL_COOLDOWN.total_seconds() // 60), exc)
     return merged
 
 def onu_key(onu: dict) -> str:
