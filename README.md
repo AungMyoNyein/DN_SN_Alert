@@ -24,7 +24,7 @@ cd /opt/DN_SN_Alert
 Or if using git:
 
 ```bash
-git clone <repo-url> /opt/DN_SN_Alert
+git clone https://github.com/AungMyoNyein/DN_SN_Alert /opt/DN_SN_Alert
 cd /opt/DN_SN_Alert
 ```
 
