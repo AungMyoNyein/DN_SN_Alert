@@ -159,6 +159,12 @@ let DOWN_ROWS  = [];          // cached current problem ONUs
 let GROUP_KEYS = [];          // index → group key (for drill-down toggle)
 const OPEN_GROUPS = new Set();// keys of expanded groups (preserved across refresh)
 const ACTIVE_CATS = new Set(['Offline', 'LOS', 'High Loss', 'Power fail']);
+const CAT_COLS = [
+  ['Offline',    '🔴 Offline'],
+  ['LOS',        '📡 LOS'],
+  ['High Loss',  '📉 High Loss'],
+  ['Power fail', '⚡ Power Fail'],
+];
 
 function toggleCat(cat, btn) {
   if (ACTIVE_CATS.has(cat)) ACTIVE_CATS.delete(cat); else ACTIVE_CATS.add(cat);
@@ -228,10 +234,15 @@ function renderDnsn() {
     natcmp(groups[a].zone, groups[b].zone) || natcmp(groups[a].odb, groups[b].odb));
   GROUP_KEYS = keys;
 
+  // Only show breakdown columns for the categories that are toggled on
+  const cols = CAT_COLS.filter(([cat]) => ACTIVE_CATS.has(cat));
+  const detailSpan = 4 + cols.length;
+
   el.innerHTML = `<table>
     <thead><tr>
       <th>DN (Zone)</th><th>SN (ODB)</th><th>Total</th>
-      <th>🔴 Offline</th><th>📡 LOS</th><th>📉 High Loss</th><th>⚡ Power Fail</th><th></th>
+      ${cols.map(([, label]) => `<th>${label}</th>`).join('')}
+      <th></th>
     </tr></thead>
     <tbody>
     ${keys.map((k, i) => {
@@ -241,14 +252,11 @@ function renderDnsn() {
         <td><b>${esc(g.zone)}</b></td>
         <td>${esc(g.odb)}</td>
         <td><b>${g.rows.length}</b></td>
-        <td>${countCat(g.rows,'Offline')    || ''}</td>
-        <td>${countCat(g.rows,'LOS')        || ''}</td>
-        <td>${countCat(g.rows,'High Loss')  || ''}</td>
-        <td>${countCat(g.rows,'Power fail') || ''}</td>
+        ${cols.map(([cat]) => `<td>${countCat(g.rows, cat) || ''}</td>`).join('')}
         <td style="text-align:right;color:var(--muted)"><span id="caret-${i}">${open ? '▾' : '▸'}</span></td>
       </tr>
       <tr id="detail-${i}" style="display:${open ? '' : 'none'}">
-        <td colspan="8" style="padding:0;background:var(--bg)">${detailTable(g.rows)}</td>
+        <td colspan="${detailSpan}" style="padding:0;background:var(--bg)">${detailTable(g.rows)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`;
