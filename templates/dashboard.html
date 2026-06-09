@@ -64,8 +64,14 @@
   <!-- DN & SN down alerts table (DN = Zone, SN = ODB) -->
   <div class="table-box">
     <div class="table-header">
-      <h3>🔻 DN &amp; SN Down Alerts</h3>
-      <span id="dnsn-count" style="font-size:12px;color:var(--muted)"></span>
+      <div>
+        <h3>🔻 DN &amp; SN Down Alerts</h3>
+        <span id="dnsn-count" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div class="chart-tabs">
+        <button id="tab-dn" class="active" onclick="setGroup('zone',this)">DN (Zone)</button>
+        <button id="tab-sn" onclick="setGroup('odb',this)">SN (ODB)</button>
+      </div>
     </div>
     <div id="dnsn-body">
       <div class="empty">Loading…</div>
@@ -147,10 +153,25 @@ async function loadStats() {
 }
 
 // DN = Zone, SN = ODB (optical distribution box)
-function dnsnTable(rows) {
+let DOWN_ROWS  = [];          // cached current down ONUs
+let GROUP_BY   = 'zone';      // 'zone' (DN) or 'odb' (SN)
+let GROUP_KEYS = [];          // index → group key (for drill-down toggle)
+const OPEN_GROUPS = new Set();// keys of expanded groups (preserved across refresh)
+
+function setGroup(mode, btn) {
+  GROUP_BY = mode;
+  document.querySelectorAll('#tab-dn,#tab-sn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderDnsn();
+}
+
+function countStatus(rows, st) { return rows.filter(r => r.new_status === st).length; }
+
+// Per-ONU detail list (the "current DN & SN Down Alerts" view)
+function detailTable(rows) {
   return `<table>
     <thead><tr>
-      <th>ONU Name</th><th>DN (Zone)</th><th>SN (ODB)</th><th>OLT / Port</th>
+      <th>ONU Name</th><th>Zone</th><th>ODB</th><th>OLT / Port</th>
       <th>Status</th><th>Signal</th><th>Address</th><th>Since</th>
     </tr></thead>
     <tbody>
@@ -167,18 +188,66 @@ function dnsnTable(rows) {
     </tbody></table>`;
 }
 
-async function loadIssues() {
-  const r = await fetch('/api/current-issues?' + filterQS());
-  const rows = await r.json();
-
-  const dnsnEl = document.getElementById('dnsn-body');
+function renderDnsn() {
+  const el   = document.getElementById('dnsn-body');
+  const rows = DOWN_ROWS;
   const zones = new Set(rows.map(x => x.zone_name).filter(Boolean));
   const odbs  = new Set(rows.map(x => x.odb).filter(Boolean));
   document.getElementById('dnsn-count').textContent =
     `${rows.length} down · ${zones.size} DN (zones) · ${odbs.size} SN (ODBs)`;
-  dnsnEl.innerHTML = rows.length
-    ? dnsnTable(rows)
-    : '<div class="empty">✅ All ONUs online — no down alerts</div>';
+
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">✅ All ONUs online — no down alerts</div>';
+    return;
+  }
+
+  const field = GROUP_BY === 'odb' ? 'odb' : 'zone_name';
+  const label = GROUP_BY === 'odb' ? 'SN (ODB)' : 'DN (Zone)';
+  const groups = {};
+  for (const r of rows) {
+    const k = r[field] || '—';
+    (groups[k] = groups[k] || []).push(r);
+  }
+  const names = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
+  GROUP_KEYS = names.map(n => GROUP_BY + '|' + n);
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>${label}</th><th>Down</th><th>🔴 Offline</th><th>📡 LOS</th><th>⚡ Power Fail</th><th></th>
+    </tr></thead>
+    <tbody>
+    ${names.map((name, i) => {
+      const g = groups[name];
+      const open = OPEN_GROUPS.has(GROUP_KEYS[i]);
+      return `<tr style="cursor:pointer" onclick="toggleGroup(${i})">
+        <td><b>${esc(name)}</b></td>
+        <td><b>${g.length}</b></td>
+        <td>${countStatus(g,'Offline')    || ''}</td>
+        <td>${countStatus(g,'LOS')        || ''}</td>
+        <td>${countStatus(g,'Power fail') || ''}</td>
+        <td style="text-align:right;color:var(--muted)"><span id="caret-${i}">${open ? '▾' : '▸'}</span></td>
+      </tr>
+      <tr id="detail-${i}" style="display:${open ? '' : 'none'}">
+        <td colspan="6" style="padding:0;background:var(--bg)">${detailTable(g)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
+function toggleGroup(i) {
+  const key = GROUP_KEYS[i];
+  const show = !OPEN_GROUPS.has(key);
+  if (show) OPEN_GROUPS.add(key); else OPEN_GROUPS.delete(key);
+  const d = document.getElementById('detail-' + i);
+  const c = document.getElementById('caret-' + i);
+  if (d) d.style.display = show ? '' : 'none';
+  if (c) c.textContent = show ? '▾' : '▸';
+}
+
+async function loadIssues() {
+  const r = await fetch('/api/current-issues?' + filterQS());
+  DOWN_ROWS = await r.json();
+  renderDnsn();
 }
 
 function loadAll() {
