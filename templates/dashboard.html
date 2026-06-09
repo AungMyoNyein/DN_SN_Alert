@@ -61,24 +61,13 @@
     </div>
   </div>
 
-  <!-- DN & SN down alerts table -->
+  <!-- DN & SN down alerts table (DN = Zone, SN = ODB) -->
   <div class="table-box">
     <div class="table-header">
-      <h3>⚡📡 DN &amp; SN Down Alerts</h3>
+      <h3>🔻 DN &amp; SN Down Alerts</h3>
       <span id="dnsn-count" style="font-size:12px;color:var(--muted)"></span>
     </div>
     <div id="dnsn-body">
-      <div class="empty">Loading…</div>
-    </div>
-  </div>
-
-  <!-- Current issues table -->
-  <div class="table-box">
-    <div class="table-header">
-      <h3>Current Issues</h3>
-      <span id="issues-count" style="font-size:12px;color:var(--muted)"></span>
-    </div>
-    <div id="issues-body">
       <div class="empty">Loading…</div>
     </div>
   </div>
@@ -157,25 +146,20 @@ async function loadStats() {
   document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
 }
 
-// DN = Power fail (dying gasp), SN = LOS (loss of signal)
-function dnsnTag(status) {
-  if (status === 'Power fail') return '<span class="badge badge-pf">⚡ DN</span>';
-  if (status === 'LOS')        return '<span class="badge badge-los">📡 SN</span>';
-  return badge(status);
-}
-
-function issuesTable(rows, withDnSn) {
+// DN = Zone, SN = ODB (optical distribution box)
+function dnsnTable(rows) {
   return `<table>
     <thead><tr>
-      <th>ONU Name</th><th>Zone</th><th>OLT / Port</th>
-      <th>${withDnSn ? 'Type' : 'Status'}</th><th>Signal</th><th>Address</th><th>Since</th>
+      <th>ONU Name</th><th>DN (Zone)</th><th>SN (ODB)</th><th>OLT / Port</th>
+      <th>Status</th><th>Signal</th><th>Address</th><th>Since</th>
     </tr></thead>
     <tbody>
     ${rows.map(r => `<tr>
       <td><b>${esc(r.onu_name) || '—'}</b></td>
       <td>${esc(r.zone_name) || '—'}</td>
+      <td>${esc(r.odb) || '—'}</td>
       <td style="color:var(--muted);font-size:12px">${esc(r.olt_name) || '—'}<br>${esc(r.port_info) || ''}</td>
-      <td>${withDnSn ? dnsnTag(r.new_status) : badge(r.new_status)}</td>
+      <td>${badge(r.new_status)}</td>
       <td style="font-size:12px">${esc(r.signal) || '—'}<br><span style="color:var(--muted)">${r.signal_dbm ? esc(r.signal_dbm)+' dBm' : ''}</span></td>
       <td style="font-size:12px;color:var(--muted)">${esc(r.address) || '—'}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(r.ts) || '—'}</td>
@@ -187,22 +171,14 @@ async function loadIssues() {
   const r = await fetch('/api/current-issues?' + filterQS());
   const rows = await r.json();
 
-  // DN & SN down alerts = Power fail + LOS only
-  const dnsn = rows.filter(x => x.new_status === 'Power fail' || x.new_status === 'LOS');
   const dnsnEl = document.getElementById('dnsn-body');
-  const dn = dnsn.filter(x => x.new_status === 'Power fail').length;
-  const sn = dnsn.filter(x => x.new_status === 'LOS').length;
-  document.getElementById('dnsn-count').textContent = `${dn} DN (Power Fail) · ${sn} SN (LOS)`;
-  dnsnEl.innerHTML = dnsn.length
-    ? issuesTable(dnsn, true)
-    : '<div class="empty">✅ No DN (Power Fail) or SN (LOS) alerts</div>';
-
-  // Current issues = everything not online
-  const el = document.getElementById('issues-body');
-  document.getElementById('issues-count').textContent = rows.length + ' devices with issues';
-  el.innerHTML = rows.length
-    ? issuesTable(rows, false)
-    : '<div class="empty">✅ All ONUs online — no current issues</div>';
+  const zones = new Set(rows.map(x => x.zone_name).filter(Boolean));
+  const odbs  = new Set(rows.map(x => x.odb).filter(Boolean));
+  document.getElementById('dnsn-count').textContent =
+    `${rows.length} down · ${zones.size} DN (zones) · ${odbs.size} SN (ODBs)`;
+  dnsnEl.innerHTML = rows.length
+    ? dnsnTable(rows)
+    : '<div class="empty">✅ All ONUs online — no down alerts</div>';
 }
 
 function loadAll() {

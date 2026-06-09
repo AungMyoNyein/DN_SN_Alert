@@ -151,11 +151,12 @@ def migrate_db():
     """Add columns introduced after the original schema, for existing databases."""
     with get_db() as db:
         cols = _table_columns(db, "onu_state")
-        for col, decl in (("olt_name", "TEXT"), ("server_id", "INTEGER"), ("server_name", "TEXT")):
+        for col, decl in (("olt_name", "TEXT"), ("server_id", "INTEGER"),
+                          ("server_name", "TEXT"), ("odb", "TEXT")):
             if col not in cols:
                 db.execute(f"ALTER TABLE onu_state ADD COLUMN {col} {decl}")
         cols = _table_columns(db, "status_events")
-        for col, decl in (("server_id", "INTEGER"), ("server_name", "TEXT")):
+        for col, decl in (("server_id", "INTEGER"), ("server_name", "TEXT"), ("odb", "TEXT")):
             if col not in cols:
                 db.execute(f"ALTER TABLE status_events ADD COLUMN {col} {decl}")
 
@@ -311,6 +312,11 @@ def onu_key(onu: dict) -> str:
     """Stable per-ONU state key, namespaced by source OLT to avoid collisions."""
     return f"{onu.get('_olt_id', 0)}:{onu.get('unique_external_id', '')}"
 
+def onu_odb(onu: dict) -> str:
+    """ODB (optical distribution box / splitter) name, tolerant of field naming."""
+    return (onu.get("odb_name") or onu.get("odb") or onu.get("splitter_name")
+            or onu.get("splitter") or onu.get("odb_id") or "")
+
 # ── Alert message builder ─────────────────────────────────────────────────────
 STATUS_EMOJI = {"Offline": "🔴", "LOS": "📡", "Power fail": "⚡", "Online": "🟢"}
 EVENT_HDR    = {
@@ -399,6 +405,7 @@ def poll_once():
                 "sig_dbm": onu.get("signal_1490") or onu.get("signal_1310"),
                 "server_id":   server_id,
                 "server_name": server_name,
+                "odb":         onu_odb(onu),
             })
 
             # Send alert and log it
@@ -424,21 +431,21 @@ def poll_once():
             )
         for e in events:
             db.execute(
-                "INSERT INTO status_events(ts,onu_uid,onu_name,zone_name,olt_name,port_info,sn,address,old_status,new_status,signal,signal_dbm,server_id,server_name) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO status_events(ts,onu_uid,onu_name,zone_name,olt_name,port_info,sn,address,old_status,new_status,signal,signal_dbm,server_id,server_name,odb) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (e["ts"], e["uid"], e["name"], e["zone"], e["olt"], e["port"],
                  e["sn"], e["address"], e["old"], e["new"], e["signal"], e["sig_dbm"],
-                 e["server_id"], e["server_name"]),
+                 e["server_id"], e["server_name"], e["odb"]),
             )
         # Persist current state so it survives restarts
         for onu in onus:
             uid = onu_key(onu)
             if uid:
                 db.execute(
-                    "INSERT OR REPLACE INTO onu_state(uid, status, signal, olt_name, server_id, server_name) "
-                    "VALUES(?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO onu_state(uid, status, signal, olt_name, server_id, server_name, odb) "
+                    "VALUES(?,?,?,?,?,?,?)",
                     (uid, onu.get("status"), onu.get("signal"),
-                     onu.get("olt_name"), onu.get("_olt_id"), onu.get("_olt_src")),
+                     onu.get("olt_name"), onu.get("_olt_id"), onu.get("_olt_src"), onu_odb(onu)),
                 )
 
     log.info("Poll done — total:%d online:%d offline:%d los:%d pf:%d events:%d",
@@ -568,7 +575,8 @@ def api_current_issues():
         rows = db.execute(f"""
             SELECT e.onu_name, e.zone_name, e.olt_name, e.port_info, e.sn,
                    e.address, e.new_status, e.signal, e.signal_dbm, e.ts,
-                   s.server_id, s.server_name
+                   s.server_id, s.server_name,
+                   COALESCE(s.odb, e.odb) AS odb
             FROM status_events e
             INNER JOIN (
                 SELECT onu_uid, MAX(id) AS max_id FROM status_events GROUP BY onu_uid
