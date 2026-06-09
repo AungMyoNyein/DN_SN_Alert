@@ -7,7 +7,7 @@ Web dashboard that polls SmartOLT every 5 minutes, detects ONU status changes, s
 ## Requirements
 
 - Python 3.10 or newer
-- pip packages: `flask`, `requests`
+- pip packages: listed in [`requirements.txt`](requirements.txt) (`flask`, `requests`)
 - A Telegram bot token and group/channel chat ID (see [Telegram setup](#telegram-setup))
 
 ---
@@ -31,7 +31,7 @@ cd /root/DN_SN_Alert
 ### 2. Install Python dependencies
 
 ```bash
-pip3 install flask requests
+pip3 install -r requirements.txt
 ```
 
 ### 3. Run the app (manual / test)
