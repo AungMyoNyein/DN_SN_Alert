@@ -152,7 +152,10 @@ def migrate_db():
     with get_db() as db:
         cols = _table_columns(db, "onu_state")
         for col, decl in (("olt_name", "TEXT"), ("server_id", "INTEGER"),
-                          ("server_name", "TEXT"), ("odb", "TEXT")):
+                          ("server_name", "TEXT"), ("odb", "TEXT"),
+                          ("onu_name", "TEXT"), ("zone_name", "TEXT"), ("address", "TEXT"),
+                          ("port_info", "TEXT"), ("sn", "TEXT"), ("signal_dbm", "TEXT"),
+                          ("since", "TEXT"), ("last_seen", "TEXT")):
             if col not in cols:
                 db.execute(f"ALTER TABLE onu_state ADD COLUMN {col} {decl}")
         cols = _table_columns(db, "status_events")
@@ -437,15 +440,21 @@ def poll_once():
                  e["sn"], e["address"], e["old"], e["new"], e["signal"], e["sig_dbm"],
                  e["server_id"], e["server_name"], e["odb"]),
             )
-        # Persist current state so it survives restarts
+        # Persist current state so it survives restarts and feeds the live dashboard
         for onu in onus:
             uid = onu_key(onu)
             if uid:
                 db.execute(
-                    "INSERT OR REPLACE INTO onu_state(uid, status, signal, olt_name, server_id, server_name, odb) "
-                    "VALUES(?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO onu_state"
+                    "(uid, status, signal, olt_name, server_id, server_name, odb, "
+                    " onu_name, zone_name, address, port_info, sn, signal_dbm, since, last_seen) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (uid, onu.get("status"), onu.get("signal"),
-                     onu.get("olt_name"), onu.get("_olt_id"), onu.get("_olt_src"), onu_odb(onu)),
+                     onu.get("olt_name"), onu.get("_olt_id"), onu.get("_olt_src"), onu_odb(onu),
+                     onu.get("name"), onu.get("zone_name"), onu.get("address"),
+                     f"{onu.get('board')}/{onu.get('port')}/{onu.get('onu')}",
+                     onu.get("sn"), onu.get("signal_1490") or onu.get("signal_1310"),
+                     onu.get("last_status_change"), ts),
                 )
 
     log.info("Poll done — total:%d online:%d offline:%d los:%d pf:%d events:%d",
@@ -563,27 +572,25 @@ def api_stats():
 
 @app.route("/api/current-issues")
 def api_current_issues():
-    """Live current non-Online ONUs (always fresh from last poll state)."""
+    """Live current non-Online ONUs, straight from the latest poll's onu_state."""
     server, olt = _dash_filters()
     extra, params = "", []
     if server:
-        extra += " AND s.server_id = ?"; params.append(server)
+        extra += " AND server_id = ?"; params.append(server)
     if olt:
-        extra += " AND e.olt_name = ?"; params.append(olt)
+        extra += " AND olt_name = ?"; params.append(olt)
     with get_db() as db:
-        # Latest event per ONU, joined to live state for the server filter
+        # last_seen = latest poll batch → naturally excludes stale/removed ONUs
         rows = db.execute(f"""
-            SELECT e.onu_name, e.zone_name, e.olt_name, e.port_info, e.sn,
-                   e.address, e.new_status, e.signal, e.signal_dbm, e.ts,
-                   s.server_id, s.server_name,
-                   COALESCE(s.odb, e.odb) AS odb
-            FROM status_events e
-            INNER JOIN (
-                SELECT onu_uid, MAX(id) AS max_id FROM status_events GROUP BY onu_uid
-            ) latest ON e.id = latest.max_id
-            LEFT JOIN onu_state s ON s.uid = e.onu_uid
-            WHERE e.new_status != 'Online' {extra}
-            ORDER BY e.ts DESC
+            SELECT onu_name, zone_name, olt_name, port_info, sn, address, odb,
+                   status AS new_status, signal, signal_dbm,
+                   COALESCE(since, last_seen) AS ts,
+                   server_id, server_name
+            FROM onu_state
+            WHERE status IS NOT NULL AND status != 'Online'
+              AND last_seen = (SELECT MAX(last_seen) FROM onu_state)
+              {extra}
+            ORDER BY ts DESC
         """, params).fetchall()
     return jsonify([dict(r) for r in rows])
 
