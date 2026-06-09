@@ -222,7 +222,10 @@ function renderDnsn() {
     const k = zone + '' + odb;
     (groups[k] = groups[k] || { zone, odb, rows: [] }).rows.push(r);
   }
-  const keys = Object.keys(groups).sort((a, b) => groups[b].rows.length - groups[a].rows.length);
+  // Order by DN (Zone) then SN (ODB), ascending with natural numeric sort
+  const natcmp = (x, y) => String(x || '').localeCompare(String(y || ''), undefined, { numeric: true, sensitivity: 'base' });
+  const keys = Object.keys(groups).sort((a, b) =>
+    natcmp(groups[a].zone, groups[b].zone) || natcmp(groups[a].odb, groups[b].odb));
   GROUP_KEYS = keys;
 
   el.innerHTML = `<table>
