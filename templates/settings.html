@@ -46,6 +46,27 @@
     </div>
   </div>
 
+  <!-- Account / password -->
+  <div style="margin-top:24px;max-width:520px">
+    <div class="form-box">
+      <h3>🔑 Change Login Password</h3>
+      <div class="field">
+        <label>Current Password</label>
+        <input type="password" id="pw_current" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label>New Password</label>
+        <input type="password" id="pw_new" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label>Confirm New Password</label>
+        <input type="password" id="pw_confirm" autocomplete="new-password">
+      </div>
+      <button class="btn btn-primary" onclick="changePassword()">🔒 Update Password</button>
+      <div id="pw-result" style="margin-top:14px;font-size:13px;display:none"></div>
+    </div>
+  </div>
+
   <div style="margin-top:24px;max-width:520px">
     <div class="form-box">
       <h3>ℹ️ How to get your Bot Token &amp; Chat ID</h3>
@@ -67,6 +88,36 @@
 </div>
 
 <script>
+async function changePassword() {
+  const current = document.getElementById('pw_current').value;
+  const newPw   = document.getElementById('pw_new').value;
+  const confirm = document.getElementById('pw_confirm').value;
+  const el = document.getElementById('pw-result');
+  el.style.display = 'block';
+  if (newPw !== confirm) {
+    el.style.color = 'var(--red)';
+    el.textContent = '❌ New passwords do not match';
+    return;
+  }
+  const r = await fetch('/api/account/password', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({current, new: newPw})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    el.style.color = 'var(--green)';
+    el.textContent = '✅ Password updated';
+    document.getElementById('pw_current').value = '';
+    document.getElementById('pw_new').value = '';
+    document.getElementById('pw_confirm').value = '';
+    showToast('Password updated');
+  } else {
+    el.style.color = 'var(--red)';
+    el.textContent = '❌ ' + (d.error || 'Failed to update password');
+  }
+}
+
 async function save() {
   const token   = document.getElementById('tg_token').value.trim();
   const chat_id = document.getElementById('tg_chat_id').value.trim();

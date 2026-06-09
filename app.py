@@ -8,19 +8,26 @@ import threading
 import time
 import logging
 import json
+import secrets
 import requests
+from functools import wraps
 from datetime import datetime, timedelta
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request
+from flask import (Flask, render_template, jsonify, request,
+                   session, redirect, url_for)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # ── Paths & constants ─────────────────────────────────────────────────────────
 BASE        = Path(__file__).parent
 DB_PATH     = BASE / "smartolt.db"
 LOG_FILE    = BASE / "app.log"
-SMARTOLT_API   = "https://giganticconnection.smartolt.com/api"
-SMARTOLT_TOKEN = "c2f5007b0fbe4585805b60d550e87e7c"
 POLL_INTERVAL  = 300   # 5 minutes
 DOWN_STATUSES  = {"Offline", "LOS", "Power fail"}
+
+# Seeded as the first OLT on a fresh database (kept for backward compatibility).
+DEFAULT_OLT_NAME   = "GiganticConnection"
+DEFAULT_OLT_DOMAIN = "giganticconnection.smartolt.com"
+DEFAULT_OLT_TOKEN  = "c2f5007b0fbe4585805b60d550e87e7c"
 
 app = Flask(__name__)
 
@@ -76,6 +83,22 @@ def init_db():
             value TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS olts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            domain     TEXT NOT NULL,
+            api_key    TEXT NOT NULL,
+            enabled    INTEGER DEFAULT 1,
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at    TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS onu_state (
             uid     TEXT PRIMARY KEY,
             status  TEXT,
@@ -114,6 +137,67 @@ def cfg_get(key: str, default="") -> str:
 def cfg_set(key: str, value: str):
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)", (key, value))
+
+# ── First-run seeding ─────────────────────────────────────────────────────────
+def seed_defaults():
+    """On a fresh database, create the default OLT and the admin account."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as db:
+        if db.execute("SELECT COUNT(*) AS c FROM olts").fetchone()["c"] == 0:
+            db.execute(
+                "INSERT INTO olts(name,domain,api_key,enabled,created_at) VALUES(?,?,?,1,?)",
+                (DEFAULT_OLT_NAME, DEFAULT_OLT_DOMAIN, DEFAULT_OLT_TOKEN, now),
+            )
+            log.info("Seeded default OLT: %s", DEFAULT_OLT_DOMAIN)
+        if db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"] == 0:
+            db.execute(
+                "INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                ("admin", generate_password_hash("admin"), now),
+            )
+            log.info("Created default admin account (username: admin / password: admin)")
+
+def get_secret_key() -> str:
+    key = cfg_get("secret_key")
+    if not key:
+        key = secrets.token_hex(32)
+        cfg_set("secret_key", key)
+    return key
+
+# ── OLT helpers ───────────────────────────────────────────────────────────────
+def olt_api_url(domain: str) -> str:
+    """Normalise a stored domain into a SmartOLT API base URL."""
+    d = domain.strip().rstrip("/")
+    d = d.replace("https://", "").replace("http://", "")
+    if d.endswith("/api"):
+        d = d[:-4]
+    return f"https://{d}/api"
+
+def get_enabled_olts() -> list[dict]:
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM olts WHERE enabled=1 ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+def probe_olt(domain: str, api_key: str) -> tuple[bool, str]:
+    """Validate a domain + API key against the SmartOLT API. Returns (ok, message)."""
+    try:
+        r = requests.get(
+            f"{olt_api_url(domain)}/onu/get_all_onus_details",
+            headers={"X-Token": api_key},
+            timeout=30,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if r.status_code in (401, 403):
+        return False, "Invalid API key (unauthorized)"
+    if r.status_code != 200:
+        return False, f"HTTP {r.status_code}"
+    try:
+        data = r.json()
+    except ValueError:
+        return False, "Unexpected response (is the domain correct?)"
+    if isinstance(data.get("status"), bool) and not data["status"]:
+        return False, data.get("error", "API error")
+    return True, f"{len(data.get('onus', []))} ONUs found"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_telegram(text: str) -> tuple[bool, str]:
@@ -160,16 +244,41 @@ def save_alert(onu: dict, new_status: str, old_status: str, delivered: bool, tg_
 
 # ── SmartOLT API ──────────────────────────────────────────────────────────────
 def fetch_onus() -> list[dict]:
-    r = requests.get(
-        f"{SMARTOLT_API}/onu/get_all_onus_details",
-        headers={"X-Token": SMARTOLT_TOKEN},
-        timeout=60,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if isinstance(data.get("status"), bool) and not data["status"]:
-        raise RuntimeError(data.get("error", "API error"))
-    return data["onus"]
+    """Fetch ONUs from every enabled OLT and merge them into one list.
+
+    Each ONU is tagged with `_olt_id` so its state key stays unique even if two
+    SmartOLT accounts happen to reuse the same unique_external_id."""
+    olts = get_enabled_olts()
+    if not olts:
+        log.warning("No enabled OLTs configured — nothing to poll")
+        return []
+
+    merged: list[dict] = []
+    for olt in olts:
+        try:
+            r = requests.get(
+                f"{olt_api_url(olt['domain'])}/onu/get_all_onus_details",
+                headers={"X-Token": olt["api_key"]},
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data.get("status"), bool) and not data["status"]:
+                log.error("OLT '%s' API error: %s", olt["name"], data.get("error", "unknown"))
+                continue
+            onus = data.get("onus", [])
+            for onu in onus:
+                onu["_olt_id"]  = olt["id"]
+                onu["_olt_src"] = olt["name"]
+            merged.extend(onus)
+            log.info("OLT '%s' returned %d ONUs", olt["name"], len(onus))
+        except Exception as exc:
+            log.error("OLT '%s' fetch failed: %s", olt["name"], exc)
+    return merged
+
+def onu_key(onu: dict) -> str:
+    """Stable per-ONU state key, namespaced by source OLT to avoid collisions."""
+    return f"{onu.get('_olt_id', 0)}:{onu.get('unique_external_id', '')}"
 
 # ── Alert message builder ─────────────────────────────────────────────────────
 STATUS_EMOJI = {"Offline": "🔴", "LOS": "📡", "Power fail": "⚡", "Online": "🟢"}
@@ -216,7 +325,7 @@ def poll_once():
     events = []
 
     for onu in onus:
-        uid        = onu.get("unique_external_id", "")
+        uid        = onu_key(onu)
         cur_status = onu.get("status", "Unknown")
         cur_signal = onu.get("signal")
 
@@ -270,7 +379,7 @@ def poll_once():
             )
         # Persist current state so it survives restarts
         for onu in onus:
-            uid = onu.get("unique_external_id", "")
+            uid = onu_key(onu)
             if uid:
                 db.execute(
                     "INSERT OR REPLACE INTO onu_state(uid, status, signal) VALUES(?,?,?)",
@@ -289,10 +398,48 @@ def poller_thread():
             log.error("Poll error: %s", exc)
         time.sleep(POLL_INTERVAL)
 
+# ── Authentication ────────────────────────────────────────────────────────────
+PUBLIC_ENDPOINTS = {"login", "static"}
+
+@app.before_request
+def require_login():
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return
+    if session.get("user"):
+        return
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "unauthorized"}), 401
+    return redirect(url_for("login", next=request.path))
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        with get_db() as db:
+            row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        if row and check_password_hash(row["password_hash"], password):
+            session["user"] = username
+            nxt = request.args.get("next") or url_for("dashboard")
+            return redirect(nxt)
+        return render_template("login.html", error="Invalid username or password")
+    if session.get("user"):
+        return redirect(url_for("dashboard"))
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
 # ── Flask routes ──────────────────────────────────────────────────────────────
 @app.route("/")
 def dashboard():
     return render_template("dashboard.html")
+
+@app.route("/olts")
+def olts_page():
+    return render_template("olts.html")
 
 @app.route("/report")
 def report():
@@ -516,6 +663,91 @@ def api_settings():
         cfg_set("tg_chat_id", chat_id)
     return jsonify({"ok": True})
 
+# ── API: OLT (SmartOLT server) management ─────────────────────────────────────
+@app.route("/api/olts")
+def api_olts_list():
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM olts ORDER BY id").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        key = d.get("api_key") or ""
+        d["api_key_masked"] = (key[:6] + "…" + key[-4:]) if len(key) > 12 else "••••"
+        del d["api_key"]
+        out.append(d)
+    return jsonify(out)
+
+@app.route("/api/olts", methods=["POST"])
+def api_olts_add():
+    data    = request.json or {}
+    name    = (data.get("name") or "").strip()
+    domain  = (data.get("domain") or "").strip()
+    api_key = (data.get("api_key") or "").strip()
+    if not name or not domain or not api_key:
+        return jsonify({"ok": False, "error": "Name, domain and API key are all required"}), 400
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO olts(name,domain,api_key,enabled,created_at) VALUES(?,?,?,1,?)",
+            (name, domain, api_key, now),
+        )
+        new_id = cur.lastrowid
+    log.info("Added OLT '%s' (%s)", name, domain)
+    return jsonify({"ok": True, "id": new_id})
+
+@app.route("/api/olts/<int:olt_id>", methods=["DELETE"])
+def api_olts_delete(olt_id):
+    with get_db() as db:
+        db.execute("DELETE FROM olts WHERE id=?", (olt_id,))
+    log.info("Deleted OLT id=%d", olt_id)
+    return jsonify({"ok": True})
+
+@app.route("/api/olts/<int:olt_id>/toggle", methods=["POST"])
+def api_olts_toggle(olt_id):
+    with get_db() as db:
+        row = db.execute("SELECT enabled FROM olts WHERE id=?", (olt_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        new_val = 0 if row["enabled"] else 1
+        db.execute("UPDATE olts SET enabled=? WHERE id=?", (new_val, olt_id))
+    return jsonify({"ok": True, "enabled": new_val})
+
+@app.route("/api/olts/test", methods=["POST"])
+def api_olts_test():
+    data    = request.json or {}
+    domain  = (data.get("domain") or "").strip()
+    api_key = (data.get("api_key") or "").strip()
+    if not domain or not api_key:
+        # Allow testing an already-saved OLT by id
+        olt_id = data.get("id")
+        if olt_id:
+            with get_db() as db:
+                row = db.execute("SELECT domain, api_key FROM olts WHERE id=?", (olt_id,)).fetchone()
+            if row:
+                domain, api_key = row["domain"], row["api_key"]
+    if not domain or not api_key:
+        return jsonify({"ok": False, "error": "Domain and API key required"})
+    ok, msg = probe_olt(domain, api_key)
+    return jsonify({"ok": ok, "message": msg if ok else None, "error": None if ok else msg})
+
+# ── API: account / password ───────────────────────────────────────────────────
+@app.route("/api/account/password", methods=["POST"])
+def api_change_password():
+    data     = request.json or {}
+    current  = data.get("current") or ""
+    new_pw   = data.get("new") or ""
+    if len(new_pw) < 4:
+        return jsonify({"ok": False, "error": "New password must be at least 4 characters"}), 400
+    username = session.get("user")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        if not row or not check_password_hash(row["password_hash"], current):
+            return jsonify({"ok": False, "error": "Current password is incorrect"}), 403
+        db.execute("UPDATE users SET password_hash=? WHERE username=?",
+                   (generate_password_hash(new_pw), username))
+    log.info("Password changed for user '%s'", username)
+    return jsonify({"ok": True})
+
 @app.route("/api/test-telegram", methods=["POST"])
 def api_test_telegram():
     data = request.json or {}
@@ -539,6 +771,8 @@ def api_test_telegram():
 # ── Startup ───────────────────────────────────────────────────────────────────
 def start():
     init_db()
+    seed_defaults()
+    app.secret_key = get_secret_key()
     global _prev_state
     _prev_state = load_prev_state()
     log.info("Restored %d ONU states from DB", len(_prev_state))

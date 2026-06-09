@@ -142,8 +142,14 @@
     <a href="/report" class="{% if request.path == '/report' %}active{% endif %}">
       <span class="left"><span class="icon">📋</span> Reports</span>
     </a>
+    <a href="/olts" class="{% if request.path == '/olts' %}active{% endif %}">
+      <span class="left"><span class="icon">🖥️</span> SmartOLT Servers</span>
+    </a>
     <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">
       <span class="left"><span class="icon">⚙️</span> Settings</span>
+    </a>
+    <a href="/logout">
+      <span class="left"><span class="icon">🚪</span> Logout</span>
     </a>
   </div>
   <div class="sidebar-footer">

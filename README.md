@@ -46,6 +46,32 @@ On first start the SQLite database (`smartolt.db`) is created automatically and 
 
 ---
 
+## Login
+
+The dashboard is protected by a login. On first run a default account is created:
+
+| Username | Password |
+|----------|----------|
+| `admin`  | `admin`  |
+
+**Change the password right after first login** — go to **Settings → Change Login Password**.
+
+---
+
+## SmartOLT Servers (domains & API keys)
+
+The app polls one or more SmartOLT servers. Manage them under **SmartOLT Servers** in the sidebar.
+
+1. Open **SmartOLT Servers**
+2. Enter a **Name**, the **Domain** (e.g. `yourcompany.smartolt.com`), and the **API Key** (`X-Token`)
+3. Click **Test Connection** to verify, then **Save Server**
+
+Each poll cycle fetches ONUs from **every enabled** server and merges the results. Use **Disable** to keep a server but skip it, or **Delete** to remove it. The API key for the SmartOLT API is found in your SmartOLT panel under **Settings → API**.
+
+> On upgrade, the previously hard-coded OLT is seeded automatically as the first server.
+
+---
+
 ## Telegram Setup
 
 You need a Telegram bot and a group or channel to receive alerts.

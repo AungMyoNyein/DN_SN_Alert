@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — GCN Alert</title>
+<style>
+  :root {
+    --bg:#0f1117; --card:#1a1d27; --border:#2a2d3e; --accent:#4f8ef7;
+    --red:#ef4444; --text:#e2e8f0; --muted:#64748b;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI', system-ui, sans-serif; background:var(--bg); color:var(--text);
+         min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .login-card { background:var(--card); border:1px solid var(--border); border-radius:14px;
+                padding:36px 32px; width:360px; box-shadow:0 8px 40px rgba(0,0,0,.5); }
+  .brand { text-align:center; margin-bottom:28px; }
+  .brand h1 { font-size:20px; font-weight:700; color:var(--accent); letter-spacing:.5px; }
+  .brand span { font-size:12px; color:var(--muted); }
+  .field { margin-bottom:16px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .field input { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text);
+                 padding:11px 13px; border-radius:8px; font-size:14px; outline:none; }
+  .field input:focus { border-color:var(--accent); }
+  .btn-login { width:100%; background:var(--accent); color:#fff; border:none; padding:11px;
+               border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; margin-top:8px; }
+  .btn-login:hover { opacity:.9; }
+  .error { background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.4); color:var(--red);
+           font-size:13px; padding:10px 12px; border-radius:8px; margin-bottom:18px; text-align:center; }
+  .foot { text-align:center; font-size:11px; color:var(--muted); margin-top:22px; }
+</style>
+</head>
+<body>
+  <form class="login-card" method="POST" action="/login{% if request.args.get('next') %}?next={{ request.args.get('next') }}{% endif %}">
+    <div class="brand">
+      <h1>🔐 GCN Alert</h1>
+      <span>SmartOLT Monitor</span>
+    </div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div class="field">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" autofocus required>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn-login" type="submit">Sign In</button>
+    <div class="foot">GCN Network © 2026</div>
+  </form>
+</body>
+</html>

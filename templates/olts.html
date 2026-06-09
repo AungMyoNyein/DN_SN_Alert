@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}SmartOLT Servers{% endblock %}
+
+{% block body %}
+<div class="topbar">
+  <div>
+    <h2>SmartOLT Servers</h2>
+    <div class="sub">Domains &amp; API keys polled for ONU status</div>
+  </div>
+</div>
+<div class="content">
+
+  <!-- Add new OLT -->
+  <div class="form-box">
+    <h3>➕ Add SmartOLT Server</h3>
+    <div class="field">
+      <label>Name / Label</label>
+      <input type="text" id="olt_name" placeholder="e.g. GiganticConnection" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>Domain</label>
+      <input type="text" id="olt_domain" placeholder="yourcompany.smartolt.com" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>API Key (X-Token)</label>
+      <input type="text" id="olt_key" placeholder="c2f5007b0fbe4585805b60d550e87e7c" autocomplete="off">
+    </div>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="btn btn-primary" onclick="addOlt()">💾 Save Server</button>
+      <button class="btn btn-ghost" onclick="testForm()">🔌 Test Connection</button>
+    </div>
+    <div id="add-result" style="margin-top:14px;font-size:13px;display:none"></div>
+  </div>
+
+  <!-- Existing OLTs -->
+  <div class="table-box" style="margin-top:24px">
+    <div class="table-header">
+      <h3>Configured Servers</h3>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Domain</th><th>API Key</th><th>Status</th><th style="text-align:right">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="olt-rows">
+        <tr><td colspan="5" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="font-size:12px;color:var(--muted);margin-top:14px;line-height:1.7">
+    Disabled servers are kept but skipped by the poller. The background poller fetches ONUs from
+    every <b>enabled</b> server each cycle and merges the results.
+  </p>
+
+</div>
+
+<script>
+async function loadOlts() {
+  const r = await fetch('/api/olts');
+  const olts = await r.json();
+  const tb = document.getElementById('olt-rows');
+  if (!olts.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">No servers configured yet — add one above.</td></tr>';
+    return;
+  }
+  tb.innerHTML = olts.map(o => `
+    <tr>
+      <td><b>${esc(o.name)}</b></td>
+      <td style="color:var(--muted)">${esc(o.domain)}</td>
+      <td><code style="font-size:11px;color:var(--muted)">${esc(o.api_key_masked)}</code></td>
+      <td>
+        <span class="badge ${o.enabled ? 'badge-online' : 'badge-offline'}">
+          ${o.enabled ? '● Enabled' : '○ Disabled'}
+        </span>
+      </td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost" style="padding:5px 10px" onclick="testOlt(${o.id}, this)">Test</button>
+        <button class="btn btn-ghost" style="padding:5px 10px" onclick="toggleOlt(${o.id})">${o.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn btn-ghost" style="padding:5px 10px;color:var(--red)" onclick="delOlt(${o.id}, '${esc(o.name)}')">Delete</button>
+      </td>
+    </tr>`).join('');
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function addOlt() {
+  const name   = document.getElementById('olt_name').value.trim();
+  const domain = document.getElementById('olt_domain').value.trim();
+  const api_key= document.getElementById('olt_key').value.trim();
+  const el = document.getElementById('add-result');
+  if (!name || !domain || !api_key) { showToast('All fields are required', false); return; }
+  const r = await fetch('/api/olts', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, domain, api_key})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast('Server saved!');
+    document.getElementById('olt_name').value = '';
+    document.getElementById('olt_domain').value = '';
+    document.getElementById('olt_key').value = '';
+    el.style.display = 'none';
+    loadOlts();
+  } else {
+    showToast(d.error || 'Save failed', false);
+  }
+}
+
+async function testForm() {
+  const domain = document.getElementById('olt_domain').value.trim();
+  const api_key= document.getElementById('olt_key').value.trim();
+  const el = document.getElementById('add-result');
+  el.style.display = 'block';
+  el.style.color = 'var(--muted)';
+  el.textContent = 'Testing connection…';
+  const r = await fetch('/api/olts/test', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({domain, api_key})
+  });
+  const d = await r.json();
+  if (d.ok) { el.style.color = 'var(--green)'; el.textContent = '✅ Connected — ' + d.message; }
+  else      { el.style.color = 'var(--red)';   el.textContent = '❌ ' + (d.error || 'Connection failed'); }
+}
+
+async function testOlt(id, btn) {
+  const orig = btn.textContent;
+  btn.textContent = '…';
+  const r = await fetch('/api/olts/test', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id})
+  });
+  const d = await r.json();
+  btn.textContent = orig;
+  if (d.ok) showToast('✅ ' + d.message);
+  else      showToast('❌ ' + (d.error || 'Failed'), false);
+}
+
+async function toggleOlt(id) {
+  await fetch(`/api/olts/${id}/toggle`, { method:'POST' });
+  loadOlts();
+}
+
+async function delOlt(id, name) {
+  if (!confirm(`Delete server "${name}"? This stops polling it.`)) return;
+  await fetch(`/api/olts/${id}`, { method:'DELETE' });
+  showToast('Server deleted');
+  loadOlts();
+}
+
+loadOlts();
+</script>
+{% endblock %}
