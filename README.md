@@ -17,15 +17,15 @@ Web dashboard that polls SmartOLT every 5 minutes, detects ONU status changes, s
 ### 1. Clone / copy the project
 
 ```bash
-cp -r DN_SN_Alert /opt/DN_SN_Alert
-cd /opt/DN_SN_Alert
+cp -r DN_SN_Alert /root/DN_SN_Alert
+cd /root/DN_SN_Alert
 ```
 
 Or if using git:
 
 ```bash
-git clone https://github.com/AungMyoNyein/DN_SN_Alert /opt/DN_SN_Alert
-cd /opt/DN_SN_Alert
+git clone https://github.com/AungMyoNyein/DN_SN_Alert /root/DN_SN_Alert
+cd /root/DN_SN_Alert
 ```
 
 ### 2. Install Python dependencies
@@ -73,13 +73,13 @@ This keeps the app running after reboots and auto-restarts on crashes.
 cp smartolt-alert.service /etc/systemd/system/smartolt-alert.service
 ```
 
-If you installed to a path other than `/root/DN_SN_Alert`, edit the service file first:
+The service file expects the app at `/root/DN_SN_Alert`. If you cloned elsewhere, edit the service file to match:
 
 ```bash
 nano /etc/systemd/system/smartolt-alert.service
 ```
 
-Update `ExecStart` and `WorkingDirectory` to match your install path.
+Update `ExecStart` and `WorkingDirectory` to your actual path.
 
 ### 2. Enable and start the service
 
