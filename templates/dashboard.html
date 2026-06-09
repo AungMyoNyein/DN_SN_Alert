@@ -68,6 +68,12 @@
         <h3>🔻 DN &amp; SN Down Alerts</h3>
         <span id="dnsn-count" style="font-size:12px;color:var(--muted)"></span>
       </div>
+      <div class="chart-tabs" id="cat-filter">
+        <button class="active" onclick="toggleCat('Offline',this)">🔴 Offline</button>
+        <button class="active" onclick="toggleCat('LOS',this)">📡 LOS</button>
+        <button class="active" onclick="toggleCat('High Loss',this)">📉 High Loss</button>
+        <button class="active" onclick="toggleCat('Power fail',this)">⚡ Power Fail</button>
+      </div>
     </div>
     <div id="dnsn-body">
       <div class="empty">Loading…</div>
@@ -149,18 +155,37 @@ async function loadStats() {
 }
 
 // DN = Zone, SN = ODB (optical distribution box)
-let DOWN_ROWS  = [];          // cached current down ONUs
+let DOWN_ROWS  = [];          // cached current problem ONUs
 let GROUP_KEYS = [];          // index → group key (for drill-down toggle)
 const OPEN_GROUPS = new Set();// keys of expanded groups (preserved across refresh)
+const ACTIVE_CATS = new Set(['Offline', 'LOS', 'High Loss', 'Power fail']);
 
-function countStatus(rows, st) { return rows.filter(r => r.new_status === st).length; }
+function toggleCat(cat, btn) {
+  if (ACTIVE_CATS.has(cat)) ACTIVE_CATS.delete(cat); else ACTIVE_CATS.add(cat);
+  btn.classList.toggle('active');
+  renderDnsn();
+}
 
-// Per-ONU detail list (the "current DN & SN Down Alerts" view)
+function countCat(rows, cat) { return rows.filter(r => r.category === cat).length; }
+
+function categoryBadge(cat) {
+  const map = {
+    'Offline':    ['badge-offline', '🔴 Offline'],
+    'LOS':        ['badge-los',     '📡 LOS'],
+    'Power fail': ['badge-pf',      '⚡ Power Fail'],
+  };
+  if (cat === 'High Loss')
+    return '<span class="badge" style="background:rgba(79,142,247,.15);color:var(--accent)">📉 High Loss</span>';
+  const [cls, label] = map[cat] || ['badge-offline', cat || '—'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+// Per-ONU detail list
 function detailTable(rows) {
   return `<table>
     <thead><tr>
       <th>ONU Name</th><th>Zone</th><th>ODB</th><th>OLT / Port</th>
-      <th>Status</th><th>Signal</th><th>Address</th><th>Since</th>
+      <th>Type</th><th>Signal</th><th>Address</th><th>Since</th>
     </tr></thead>
     <tbody>
     ${rows.map(r => `<tr>
@@ -168,7 +193,7 @@ function detailTable(rows) {
       <td>${esc(r.zone_name) || '—'}</td>
       <td>${esc(r.odb) || '—'}</td>
       <td style="color:var(--muted);font-size:12px">${esc(r.olt_name) || '—'}<br>${esc(r.port_info) || ''}</td>
-      <td>${badge(r.new_status)}</td>
+      <td>${categoryBadge(r.category)}</td>
       <td style="font-size:12px">${esc(r.signal) || '—'}<br><span style="color:var(--muted)">${r.signal_dbm ? esc(r.signal_dbm)+' dBm' : ''}</span></td>
       <td style="font-size:12px;color:var(--muted)">${esc(r.address) || '—'}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(r.ts) || '—'}</td>
@@ -178,14 +203,14 @@ function detailTable(rows) {
 
 function renderDnsn() {
   const el   = document.getElementById('dnsn-body');
-  const rows = DOWN_ROWS;
+  const rows = DOWN_ROWS.filter(r => ACTIVE_CATS.has(r.category));
   const zones = new Set(rows.map(x => x.zone_name).filter(Boolean));
   const odbs  = new Set(rows.map(x => x.odb).filter(Boolean));
   document.getElementById('dnsn-count').textContent =
-    `${rows.length} down · ${zones.size} DN (zones) · ${odbs.size} SN (ODBs)`;
+    `${rows.length} alerts · ${zones.size} DN (zones) · ${odbs.size} SN (ODBs)`;
 
   if (!rows.length) {
-    el.innerHTML = '<div class="empty">✅ All ONUs online — no down alerts</div>';
+    el.innerHTML = '<div class="empty">✅ No alerts for the selected types</div>';
     return;
   }
 
@@ -202,8 +227,8 @@ function renderDnsn() {
 
   el.innerHTML = `<table>
     <thead><tr>
-      <th>DN (Zone)</th><th>SN (ODB)</th><th>Down</th>
-      <th>🔴 Offline</th><th>📡 LOS</th><th>⚡ Power Fail</th><th></th>
+      <th>DN (Zone)</th><th>SN (ODB)</th><th>Total</th>
+      <th>🔴 Offline</th><th>📡 LOS</th><th>📉 High Loss</th><th>⚡ Power Fail</th><th></th>
     </tr></thead>
     <tbody>
     ${keys.map((k, i) => {
@@ -213,13 +238,14 @@ function renderDnsn() {
         <td><b>${esc(g.zone)}</b></td>
         <td>${esc(g.odb)}</td>
         <td><b>${g.rows.length}</b></td>
-        <td>${countStatus(g.rows,'Offline')    || ''}</td>
-        <td>${countStatus(g.rows,'LOS')        || ''}</td>
-        <td>${countStatus(g.rows,'Power fail') || ''}</td>
+        <td>${countCat(g.rows,'Offline')    || ''}</td>
+        <td>${countCat(g.rows,'LOS')        || ''}</td>
+        <td>${countCat(g.rows,'High Loss')  || ''}</td>
+        <td>${countCat(g.rows,'Power fail') || ''}</td>
         <td style="text-align:right;color:var(--muted)"><span id="caret-${i}">${open ? '▾' : '▸'}</span></td>
       </tr>
       <tr id="detail-${i}" style="display:${open ? '' : 'none'}">
-        <td colspan="7" style="padding:0;background:var(--bg)">${detailTable(g.rows)}</td>
+        <td colspan="8" style="padding:0;background:var(--bg)">${detailTable(g.rows)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`;

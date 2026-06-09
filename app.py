@@ -23,6 +23,7 @@ DB_PATH     = BASE / "smartolt.db"
 LOG_FILE    = BASE / "app.log"
 POLL_INTERVAL  = 300   # 5 minutes
 DOWN_STATUSES  = {"Offline", "LOS", "Power fail"}
+HIGH_LOSS_DBM  = -25.0  # Online ONUs with RX signal at/below this are "High Loss"
 
 # Seeded as the first OLT on a fresh database (kept for backward compatibility).
 DEFAULT_OLT_NAME   = "GiganticConnection"
@@ -572,25 +573,38 @@ def api_stats():
 
 @app.route("/api/current-issues")
 def api_current_issues():
-    """Live current non-Online ONUs, straight from the latest poll's onu_state."""
+    """Live problem ONUs (down or high optical loss), from the latest poll's onu_state."""
     server, olt = _dash_filters()
-    extra, params = "", []
+    extra, fparams = "", []
     if server:
-        extra += " AND server_id = ?"; params.append(server)
+        extra += " AND server_id = ?"; fparams.append(server)
     if olt:
-        extra += " AND olt_name = ?"; params.append(olt)
+        extra += " AND olt_name = ?"; fparams.append(olt)
+    # Placeholders in source order: WHERE threshold, filter params, ORDER BY threshold
+    params = [HIGH_LOSS_DBM] + fparams + [HIGH_LOSS_DBM]
     with get_db() as db:
         # last_seen = latest poll batch → naturally excludes stale/removed ONUs
         rows = db.execute(f"""
             SELECT onu_name, zone_name, olt_name, port_info, sn, address, odb,
                    status AS new_status, signal, signal_dbm,
                    COALESCE(since, last_seen) AS ts,
-                   server_id, server_name
+                   server_id, server_name,
+                   CASE
+                     WHEN status = 'Power fail' THEN 'Power fail'
+                     WHEN status = 'LOS'        THEN 'LOS'
+                     WHEN status != 'Online'    THEN 'Offline'
+                     ELSE 'High Loss'
+                   END AS category
             FROM onu_state
-            WHERE status IS NOT NULL AND status != 'Online'
+            WHERE status IS NOT NULL
               AND last_seen = (SELECT MAX(last_seen) FROM onu_state)
+              AND (
+                    status != 'Online'
+                    OR (signal_dbm IS NOT NULL AND TRIM(signal_dbm) != ''
+                        AND CAST(signal_dbm AS REAL) <= ?)
+                  )
               {extra}
-            ORDER BY ts DESC
+            ORDER BY (CAST(signal_dbm AS REAL) <= ? AND status = 'Online') ASC, ts DESC
         """, params).fetchall()
     return jsonify([dict(r) for r in rows])
 
